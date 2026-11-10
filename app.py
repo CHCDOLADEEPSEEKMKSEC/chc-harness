@@ -149,6 +149,15 @@ ADMIN_TOKEN = (getattr(CLI, "admin_token", "") or "").strip()
 PUBLIC_URL = os.environ.get("CHC_PUBLIC_URL", "")
 MAX_TOKENS = max(64, CLI.max_tokens)
 UPSTREAM_KEY_FILE = pathlib.Path(CLI.upstream_key)
+# the house key can live on a read-only path; fall back to the vault copy rather than
+# switching DeepSeek off because one file is in the wrong place.
+for _c in (pathlib.Path("/mnt/ledger/vault/keys/deepseek_api.key"), pathlib.Path("/opt/chc-harness/upstream.key")):
+    try:
+        if not UPSTREAM_KEY_FILE.exists() and _c.is_file() and _c.read_text().strip():
+            UPSTREAM_KEY_FILE = _c
+            break
+    except Exception:
+        pass
 
 ADMIN_TOKEN_FILE = pathlib.Path(os.environ.get('CHC_AI_ADMIN_TOKEN_FILE', '/opt/chc-ai/admin.token'))
 
@@ -738,7 +747,9 @@ def _stream_llm(messages, max_tokens, on_delta, on_done, on_error, upstream=Fals
                 try: j = json.loads(d)
                 except Exception: continue
                 ch = (j.get("choices") or [{}])[0]
-                piece = (ch.get("delta") or {}).get("content") or ""
+                _d = ch.get("delta") or {}
+                # Qwen3 thinking builds stream the answer in reasoning_content
+                piece = _d.get("content") or _d.get("reasoning_content") or ""
                 if piece: emit_clean(piece)
                 fr = ch.get("finish_reason")
                 if fr and result is not None: result["finish"] = fr
@@ -3085,6 +3096,15 @@ async def api_chat(r):
     if not text and not attach_ids: return web.json_response({"error": "empty message"}, status=400)
     c = db()
     own = c.execute("select 1 from chats where id=? and uid=?", (cid, u["id"])).fetchone()
+    if not own:
+        # fresh workspace, or a stale chat id from an older install: give this account a chat
+        # of its own and carry on instead of 404-ing the user's message.
+        cid = uuid.uuid4().hex
+        c.execute("insert into chats(id,uid,title,created,updated,perms) values(?,?,?,?,?,?)",
+                  (cid, u["id"], "chat", now(), now(), perms))
+        c.commit()
+        own = c.execute("select 1 from chats where id=? and uid=?", (cid, u["id"])).fetchone()
+        print("[chat] self-heal -> chat", cid, "uid", u["id"], flush=True)
     if not own: c.close(); return web.json_response({"error": "not found"}, status=404)
     # per-plan daily cap: free 60, Qwen+ 1500, DeepSeek 5000 (see PLANS)
     _plan = plan_of(u)

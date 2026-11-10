@@ -160,6 +160,13 @@ for _c in (pathlib.Path("/mnt/ledger/vault/keys/deepseek_api.key"), pathlib.Path
         pass
 
 ADMIN_TOKEN_FILE = pathlib.Path(os.environ.get('CHC_AI_ADMIN_TOKEN_FILE', '/opt/chc-ai/admin.token'))
+# the unit starts without --admin-token: take it from the token file the installer wrote,
+# otherwise /enter and the admin routes answer 403 on a box that was installed correctly.
+if not ADMIN_TOKEN:
+    try:
+        ADMIN_TOKEN = ADMIN_TOKEN_FILE.read_text().strip()
+    except Exception:
+        pass
 
 
 def admin_ok(tok):

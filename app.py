@@ -67,6 +67,10 @@ def _parse_cli():
                     help="seconds a magic login link stays valid (default 900)")
     ap.add_argument("--make-user", default="", metavar="EMAIL",
                     help="create this account if missing, then print a login link")
+    ap.add_argument("--set-password", default="", metavar="EMAIL",
+                    help="set (or generate) this account's login password and print it once")
+    ap.add_argument("--password", default="", metavar="PW",
+                    help="use this password with --set-password instead of generating one")
     ap.add_argument("--magic-link", default="", metavar="EMAIL",
                     help="mint a one-time login link for EMAIL and exit")
     ap.add_argument("--public-url", default=os.environ.get("CHC_AI_PUBLIC_URL", ""),
@@ -631,6 +635,36 @@ def pw_hash(pw, salt):
     return hashlib.pbkdf2_hmac("sha256", pw.encode(), bytes.fromhex(salt), 200_000).hex()
 
 def new_salt(): return secrets.token_hex(16)
+
+def gen_password(n: int = 16) -> str:
+    """Human-typable strong password: no 0/O, 1/l/I, and always one of each class."""
+    letters = "abcdefghijkmnopqrstuvwxyz"
+    upper = "ABCDEFGHJKLMNPQRSTUVWXYZ"
+    digits = "23456789"
+    symbols = "!@#$%^&*-_=+"
+    pool = letters + upper + digits + symbols
+    while True:
+        pw = "".join(secrets.choice(pool) for _ in range(n))
+        if (any(c in letters for c in pw) and any(c in upper for c in pw)
+                and any(c in digits for c in pw) and any(c in symbols for c in pw)):
+            return pw
+
+def set_user_password(c, email: str, pw: str = "") -> tuple:
+    """Set (or generate) the login password for an account. Returns (email, password)."""
+    email = (email or "").strip().lower()
+    row = c.execute("select id from users where lower(email)=?", (email,)).fetchone()
+    if not row:
+        salt0 = new_salt()
+        handle = email.split("@")[0][:24] or "owner"
+        c.execute("insert into users(email,handle,pw,salt,totp,plan,created,verified) values(?,?,?,?,?,?,?,1)",
+                  (email, handle, pw_hash(secrets.token_hex(16), salt0), salt0, secrets.token_hex(10), "free", now()))
+        c.commit()
+        row = c.execute("select id from users where lower(email)=?", (email,)).fetchone()
+    pw = pw or gen_password()
+    salt = new_salt()
+    c.execute("update users set pw=?, salt=?, verified=1 where id=?", (pw_hash(pw, salt), salt, row["id"]))
+    c.commit()
+    return email, pw
 
 def sign(payload: str) -> str:
     mac = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
@@ -4997,6 +5031,50 @@ async def api_usage(r):
     return web.json_response({"messages_total": total, "by_day": [dict(x) for x in by_day],
                               "keys": [dict(x) for x in keys], "billing_unit": "message"})
 
+async def api_admin_genpass(r):
+    """Admin only: generate a NEW login password for an account and return it once.
+    This is the button on /admin/usage. It never emails anything and needs the admin token,
+    so it cannot be triggered by someone who only knows an email address."""
+    tok = r.query.get("token") or r.headers.get("X-Admin-Token", "")
+    if not ADMIN_TOKEN or tok != ADMIN_TOKEN:
+        return web.json_response({"error": "forbidden"}, status=403)
+    try:
+        d = await r.json()
+    except Exception:
+        d = {}
+    email = (d.get("email") or "").strip().lower()
+    c = db()
+    if not email:
+        owner_paths = [DBP.parent / "owner", pathlib.Path("/opt/chc-harness/owner"), pathlib.Path("/opt/chc-ai/owner")]
+        if os.environ.get("CHC_OWNER_FILE"):
+            owner_paths.insert(0, pathlib.Path(os.environ["CHC_OWNER_FILE"]))
+        own = ""
+        for _p in owner_paths:
+            try:
+                if _p.exists():
+                    own = _p.read_text().strip().lower()
+                    if own:
+                        break
+            except Exception:
+                pass
+        n_users = c.execute("select count(*) n from users").fetchone()["n"]
+        first = c.execute("select email from users order by id limit 1").fetchone() if n_users else None
+        email = own or (first["email"] if first else "")
+    if not email:
+        c.close()
+        return web.json_response({"error": "no account yet — create one first"}, status=400)
+    em, pw = set_user_password(c, email)
+    c.close()
+    log_line = "[admin] new password generated for %s at %s" % (em, datetime.datetime.utcnow().isoformat())
+    try:
+        with open("/tmp/chc_admin_password.log", "a") as fh:
+            fh.write(log_line + "\n")
+    except Exception:
+        pass
+    return web.json_response({"ok": True, "email": em, "password": pw,
+                              "signin": (BASE or "") + "/signin"})
+
+
 async def admin_usage(r):
     tok = r.query.get("token") or r.headers.get("X-Admin-Token", "")
     if not ADMIN_TOKEN or tok != ADMIN_TOKEN:
@@ -5026,6 +5104,33 @@ async def admin_usage(r):
   <div style="margin-top:8px"><a href="%s" style="color:#39ff9e;word-break:break-all">%s</a></div>
   <div style="opacity:.55;margin-top:8px">Bookmark it. It does not expire and does not change.</div>
 </div>
+<div style="border:1px solid #ffb84d;padding:14px 16px;margin:0 0 22px;max-width:820px">
+  <div style="color:#ffb84d">LOGIN PASSWORD &mdash; generated here, never emailed</div>
+  <p style="opacity:.75;margin:8px 0 12px">Press the button: the harness makes a strong password for the
+  owner account, shows it <b>once</b> on this page, and sets it. Then sign in at <code>/signin</code>
+  with that email + password. No link, no code, no email address trust.</p>
+  <button id="genpw" style="background:#ffb84d;color:#080a0e;border:0;padding:11px 18px;font:inherit;font-weight:700;cursor:pointer">GENERATE NEW PASSWORD</button>
+  <div id="pwout" style="margin-top:14px;font-size:15px"></div>
+</div>
+<script>
+(function(){
+  var tk = new URLSearchParams(location.search).get('token') || '';
+  document.getElementById('genpw').onclick = async function(){
+    var out = document.getElementById('pwout'); var b = this;
+    b.disabled = true; out.textContent = 'generating...';
+    try {
+      var r = await fetch('/api/admin/genpass?token=' + encodeURIComponent(tk), {method:'POST',
+        headers:{'Content-Type':'application/json'}, body: JSON.stringify({})});
+      var d = await r.json();
+      if (!d.password) { out.textContent = 'error: ' + (d.error || 'failed'); b.disabled = false; return; }
+      out.innerHTML = '<div style="color:#39ff9e">email</div><div style="font-size:19px">' + d.email +
+        '</div><div style="color:#39ff9e;margin-top:8px">password (shown once)</div>' +
+        '<div style="font-size:24px;letter-spacing:1px;background:#111;padding:10px;border:1px solid #39ff9e">' +
+        d.password + '</div><div style="margin-top:10px"><a href="/signin" style="color:#39ff9e">open the sign-in page &rarr;</a></div>';
+    } catch(e) { out.textContent = 'network error: ' + e; b.disabled = false; }
+  };
+})();
+</script>
 <table cellpadding=6 style="border-collapse:collapse;font-size:13px">
 <tr style="color:#39ff9e;text-align:left"><th>email</th><th>plan</th><th>key</th><th>label</th><th>state</th><th>requests</th><th>tokens</th></tr>
 %s
@@ -5181,6 +5286,7 @@ def build_app():
     app.router.add_get("/api/memory-info", api_memory_info)
     app.router.add_get("/api/verify", api_verify)
     app.router.add_get("/admin/usage", admin_usage)
+    app.router.add_post("/api/admin/genpass", api_admin_genpass)
     app.router.add_route("*", "/api/plugins", api_plugins)
     app.router.add_route("*", "/api/tasks", api_tasks)
     app.router.add_get("/api/search", api_search)
@@ -5256,6 +5362,13 @@ if __name__ == "__main__":
         c.commit(); c.close()
         base = CLI.public_url.rstrip("/") or ("http://%s:%d" % (CLI.host, PORT))
         print("%s/magic?t=%s" % (base, tok), flush=True)
+        raise SystemExit(0)
+    if CLI.set_password:
+        c = db()
+        em, pw = set_user_password(c, CLI.set_password, CLI.password)
+        c.close()
+        print("EMAIL=%s" % em, flush=True)
+        print("PASSWORD=%s" % pw, flush=True)
         raise SystemExit(0)
     if CLI.magic_link:
         c = db()

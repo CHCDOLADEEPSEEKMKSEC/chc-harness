@@ -1,0 +1,12 @@
+# runtime data — never commit
+data/
+files/
+work/
+*.db
+*.db-journal
+*.log
+.env
+secret
+admin.token
+__pycache__/
+*.pyc

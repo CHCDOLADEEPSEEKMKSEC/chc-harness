@@ -1,0 +1,25 @@
+# CHC HARNESS — self-host, model included.  docker compose up -d
+# Then open http://localhost:8895
+services:
+  model:
+    image: ollama/ollama:latest
+    volumes: [ "model:/root/.ollama" ]
+    entrypoint: ["/bin/sh","-c","ollama serve & sleep 3 && ollama pull qwen2.5:3b && wait"]
+    restart: unless-stopped
+
+  harness:
+    build: .
+    image: chc-harness:latest
+    depends_on: [ model ]
+    ports: [ "8895:8895" ]
+    volumes: [ "data:/data" ]
+    environment:
+      CHC_AI_PORT: "8895"
+      CHC_AI_DB: /data/chc.db
+      CHC_AI_SECRET_FILE: /data/secret
+      CHC_AI_LLM_URL: http://model:11434/v1/chat/completions
+    restart: unless-stopped
+
+volumes:
+  data:
+  model:

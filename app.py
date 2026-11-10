@@ -1193,7 +1193,8 @@ def app_page(user, switched=""):
       <span class=badge id=planbadge>{user['plan'].upper()}</span>
     </div>
     <div class=row style="margin:8px 0 0">
-      <a class=chip href="{BASE}/authorise" title="Control what SPARKY may remember">{'MEMORY ON' if user['memory_on'] else 'AUTHORISE MEMORY'}</a>
+      <a class=chip id=autoscroll title="Keep the chat pinned to the newest message" onclick="toggleScroll();return false" style="cursor:pointer">AUTO-SCROLL</a>
+    <a class=chip href="{BASE}/authorise" title="Control what SPARKY may remember">{'MEMORY ON' if user['memory_on'] else 'AUTHORISE MEMORY'}</a>
       <button class="chip" id=settings>SETTINGS</button>
       <a class=chip href="{BASE}/assist">HELP</a>
       <a class=chip href="{BASE}/feedback">FEEDBACK</a>
@@ -1331,7 +1332,7 @@ function bubble(role,text){{
     v.style.cssText='display:block;max-width:min(520px,100%);max-height:340px;border:1px solid var(--line);border-radius:10px;margin-top:8px;background:#000';
     bub.appendChild(v);
   }});
-  msgs.appendChild(d); msgs.scrollTop=msgs.scrollHeight;
+  msgs.appendChild(d); stick();
   return bub;
 }}
 function hintText(){{return mode+' mode · '+perm+(perm==='full'?' · shell on':(perm==='read-write'?' · file tools only':' · no tools'));}}
@@ -1443,6 +1444,8 @@ async function openChat(id){{
     (list.length>400?list.slice(list.length-400):list).forEach(m=>bubble(m.role,m.content));
     if(list.length>400){{const n=document.createElement('div');n.className='msg';n.innerHTML='<div class=bub style="color:#8b93a3">showing the last 400 messages — the rest are safe on the server</div>';msgs.insertBefore(n,msgs.firstChild);}}
     (jj.tools||[]).forEach(t=>toolBlock(t.name,t.args,t.result));
+    lastSeen = list.length ? (list[list.length-1].id||0) : 0;
+    startSync();
   }}catch(e){{bubble('assistant','could not load this chat: '+e);}}
   hideLoading();
   await refreshChats();
@@ -1453,6 +1456,50 @@ async function restore(){{
   let last=null; try{{last=localStorage.getItem('chc_chat');}}catch(_){{}}
   const pick=chatList.find(c=>c.id===last)||chatList[0];
   if(pick) await openChat(pick.id);
+}}
+// ---- AUTO-SCROLL + INLINE CHAT SYNC ---------------------------------------------
+let autoscroll=true, lastSeen=0, syncTimer=null;
+function stick(){{ if(autoscroll) msgs.scrollTop=msgs.scrollHeight; }}
+function paintScroll(){{ const c=document.getElementById('autoscroll'); if(c) c.classList.toggle('on',autoscroll); }}
+function toggleScroll(){{ autoscroll=!autoscroll; paintScroll(); if(autoscroll) stick(); }}
+msgs.addEventListener('scroll',()=>{{
+  const atBottom = msgs.scrollHeight-msgs.scrollTop-msgs.clientHeight < 60;
+  if(!atBottom && autoscroll){{ autoscroll=false; paintScroll(); }}
+  if(atBottom && !autoscroll){{ autoscroll=true; paintScroll(); }}
+}});
+paintScroll();
+async function syncOnce(){{
+  if(!chat) return;
+  try{{
+    const r=await fetch(BASE+'/api/chats/'+chat+'/since?after='+lastSeen); if(!r.ok) return;
+    const j=await r.json();
+    for(const m of (j.messages||[])){{
+      if(!m || !m.id || m.id<=lastSeen) continue;
+      lastSeen=m.id;
+      if(m.role==='user' || m.role==='assistant'){{
+        // skip a duplicate of the bubble we are currently streaming into
+        const last=msgs.lastElementChild;
+        if(last && last.dataset && last.dataset.sid===String(m.id)) continue;
+        const b=bubble(m.role,m.content); if(b){{
+          const wrap=b.closest('.msg'); if(wrap) wrap.dataset.sid=String(m.id);
+        }}
+      }}
+    }}
+    stick();
+  }}catch(_){{}}
+}}
+function startSync(){{
+  if(syncTimer) clearInterval(syncTimer);
+  lastSeen=lastSeen||0;
+  syncOnce();
+  syncTimer=setInterval(syncOnce, 6000);
+}}
+async function cursorToEnd(){{
+  if(!chat) return;
+  try{{
+    const r=await fetch(BASE+'/api/chats/'+chat); const j=await r.json();
+    const ms=j.messages||[]; if(ms.length) lastSeen=ms[ms.length-1].id||0;
+  }}catch(_){{}}
 }}
 document.querySelector('#send').onclick=async()=>{{
   const text=q.value.trim(); if(!text)return;
@@ -2512,6 +2559,32 @@ async def h_enter(r):
                     max_age=60 * 60 * 24 * 365 * 5, path="/", secure=False)
     return resp
 
+async def h_signin(r):
+    """Plain email + password sign-in — one page, two fields, no code needed."""
+    body = """
+<main style="max-width:440px;margin:12vh auto;padding:0 20px">
+  <h1 class=wordmark style="font-size:30px">SIGN IN</h1>
+  <p class=sub style="color:#8b93a3">Email and password. If you have not set a password yet, use the email-code page.</p>
+  <div class=field><label>EMAIL</label><input id=em type=email autocomplete=username placeholder="you@example.com"></div>
+  <div class=field><label>PASSWORD</label><input id=pw type=password autocomplete=current-password placeholder="your password"></div>
+  <button class="btn neon" id=go style="width:100%">SIGN IN</button>
+  <p id=msg style="color:#ff6b6b;min-height:20px"></p>
+  <p class=sub><a href="/login">Use an email code instead</a> · <a href="/signup">Create an account</a></p>
+  <script>
+  async function go(){
+    const em=document.getElementById('em').value.trim(), pw=document.getElementById('pw').value, msg=document.getElementById('msg');
+    if(!em||!pw){msg.textContent='email and password, please';return;}
+    const r=await fetch('/api/login',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:em,pw:pw})});
+    const j=await r.json().catch(()=>({}));
+    if(j.ok){location.href='/app';} else {msg.textContent=j.error||'could not sign in';}
+  }
+  document.getElementById('go').onclick=go;
+  document.getElementById('pw').addEventListener('keydown',e=>{if(e.key==='Enter')go();});
+  </script>
+</main>"""
+    return web.Response(text=page("Sign in", body, css=FIRE_CSS), content_type="text/html",
+                        headers={"Cache-Control": "no-store"})
+
 async def h_login_page(r): return web.Response(text=auth_page("login"), content_type="text/html")
 async def h_totp_page(r): return web.Response(text=totp_page(), content_type="text/html")
 async def h_health(r):
@@ -3017,7 +3090,7 @@ async def api_chat_get(r):
     cid = r.match_info["cid"]; c = db()
     own = c.execute("select 1 from chats where id=? and uid=?", (cid, u["id"])).fetchone()
     if not own: c.close(); return web.json_response({"error": "not found"}, status=404)
-    rows = c.execute("select role,content,ts from msgs where chat=? order by id", (cid,)).fetchall()
+    rows = c.execute("select id,role,content,ts from msgs where chat=? order by id", (cid,)).fetchall()
     try:
         tools = c.execute("select ts,name,args,result from tool_runs where chat=? order by id", (cid,)).fetchall()
         tools = [dict(x) for x in tools]
@@ -3026,6 +3099,21 @@ async def api_chat_get(r):
     c.close()
     return web.json_response({"messages": [dict(x) for x in rows], "tools": tools})
 
+
+async def api_chat_since(r):
+    """Messages newer than ?after=<id> — what the inline chat polls so a second device
+    or a second tab sees the same conversation without a reload."""
+    u = current_user(r)
+    if not u: return web.json_response({"error": "auth"}, status=401)
+    cid = r.match_info["cid"]
+    try: after = int(r.query.get("after", "0") or 0)
+    except Exception: after = 0
+    c = db()
+    own = c.execute("select 1 from chats where id=? and uid=?", (cid, u["id"])).fetchone()
+    if not own: c.close(); return web.json_response({"error": "not found"}, status=404)
+    rows = c.execute("select id,role,content,ts from msgs where chat=? and id>? order by id", (cid, after)).fetchall()
+    c.close()
+    return web.json_response({"messages": [dict(x) for x in rows]})
 
 PERSONA_TEMPLATE = """You are {NAME} — the resident AI of CHC HARNESS (CHCFLASH33 / BAFOUNE-NET / MIRAGE INTELLIGENCE).
 You are not a chatbot. You are a modern harness unit and the user's 2IC — second in command: the user makes the decision, you own the execution and report back clean.
@@ -5019,6 +5107,7 @@ def build_app():
     app.router.add_get("/magic", h_magic)
     app.router.add_get("/enter", h_enter)
     app.router.add_get("/login", h_login_page)
+    app.router.add_get("/signin", h_signin)
     app.router.add_get("/totp", h_totp_page)
     app.router.add_get("/app", h_app)
     app.router.add_get("/logout", h_logout)
@@ -5071,6 +5160,7 @@ def build_app():
     app.router.add_post("/api/model", api_model)
     app.router.add_route("*", "/api/chats", api_chats)
     app.router.add_get("/api/chats/{cid}", api_chat_get)
+    app.router.add_get("/api/chats/{cid}/since", api_chat_since)
     app.router.add_post("/api/chat", api_chat)
     app.router.add_route("*", "/api/keys", api_keys)
     app.router.add_delete("/api/keys/{prefix}", api_key_delete)

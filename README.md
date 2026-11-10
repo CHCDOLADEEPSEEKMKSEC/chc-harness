@@ -69,11 +69,15 @@ A receipt is not a log. `verify` is the point: edit the file and the chain fails
 - Early days, solo-built, small surface. No SLA, no support contract.
 - Hosted billing on the public instance is **crypto-only** and matches exact amounts; there is no card rail.
 - The hosted instance accepts 0-confirmation BTC — fine for $5, not fine for a house.
-- Self-hosted mode is uncapped and yours; nothing phones home.
+- Self-hosted mode is uncapped for your own use; nothing phones home.
 
-## License
+## License — source-available, all rights reserved
 
-MIT — see [LICENSE](LICENSE). Use it, fork it, run it, ship it inside your own product.
+Read it: yes. Run an **unmodified** copy for your own non-commercial self-hosting: yes.
+Modify it, redistribute it, sell it, or host it for other people: **no** — not without
+written permission. See [LICENSE](LICENSE). This is not an open-source project.
+
+The receipt chain, the code, and the design belong to CHC / Mirage Intelligence.
 
 ## Links
 

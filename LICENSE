@@ -1,17 +1,26 @@
-MIT License
+CHC HARNESS — SOURCE-AVAILABLE LICENSE
+Copyright (c) 2026 CHC / Mirage Intelligence. All rights reserved.
 
-Copyright (c) 2026 CHC / Mirage Intelligence
+This is not an open-source licence. It is deliberately restrictive.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+PERMITTED
+  1. Read this source code.
+  2. Run an UNMODIFIED copy of this software, for personal, non-commercial
+     evaluation or self-hosting, on hardware you control.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+NOT PERMITTED WITHOUT PRIOR WRITTEN PERMISSION FROM THE COPYRIGHT HOLDER
+  1. Modifying, adapting, translating, or creating derivative works from this
+     software, in whole or in part.
+  2. Redistributing, sublicensing, publishing, selling, or otherwise making this
+     software or any copy or derivative of it available to any third party.
+  3. Any commercial use, including offering it (modified or not) as a hosted or
+     managed service, or bundling it into a product or service you sell.
+  4. Removing or altering this licence, the copyright notices, or the receipt /
+     signature mechanism.
+  5. Using the CHC, Mirage Intelligence, BAFOUNE-NET or CHC HARNESS names, logos
+     or marks, except to state factually where the unmodified software came from.
 
+NO WARRANTY
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
 FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
@@ -19,3 +28,6 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+You may verify, but not reuse. Reading is free; building on it is not.
+Permissions: see the contact address on https://ai.94-237-56-140.sslip.io/security

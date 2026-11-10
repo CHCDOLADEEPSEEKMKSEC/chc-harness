@@ -987,7 +987,7 @@ def auth_page(mode):
     <h1 class=wordmark style="font-size:clamp(34px,7vw,84px)">CHC HARNESS<span class=see>SEE 7.7.8</span></h1>
     <p class=sub>Email in, 6-digit code out. No passwords to remember.</p>
     <div class=grid>
-      <div class=feat><h4>FREE TIER</h4><p>30 messages a day, no card.</p></div>
+      <div class=feat><h4>FREE TIER</h4><p>60 calls a day, no card.</p></div>
       <div class=feat><h4>$5 / MONTH</h4><p>Hosted by us, or self-hosted on your own machine — same price, same harness. Qwen engine either way.</p></div>
       <div class=feat><h4>TWO WAYS TO RUN IT</h4><p>Click a link and use ours, or download it and run it yourself. Same $5.</p></div>
       <div class=feat><h4>RUN IT YOURSELF</h4><p>One command on your own machine, your own vault and key:<br><code class=mono>curl -fsSL {BASE}/install.sh | bash</code><br>or <code class=mono>docker run -p 8895:8895 chc-harness</code></p></div>
@@ -1010,6 +1010,9 @@ def auth_page(mode):
       <div class=row><button class=btn id=loginpw style="width:100%">LOG IN WITH PASSWORD</button></div>
     </div>
     <div id=msg class=err style="margin-top:10px"></div>
+    <p style="color:#8892a6;font-size:12px;margin:14px 0 0;line-height:1.7">
+    <b>Don't take our word for it.</b> The source is public — read the code, run it yourself, check the
+    signed receipt chain: <a href="https://github.com/CHCDOLADEEPSEEKMKSEC/chc-harness" style="color:var(--neo)">github.com/CHCDOLADEEPSEEKMKSEC/chc-harness</a></p>
     <p style="color:#5d6779;font-size:12px;margin:12px 0 0" id=hint>Password or a one-time email code — your choice.
     <a href="{BASE}/claim" style="color:#8892a6">Have a claim link?</a></p>
   </div>
@@ -2794,7 +2797,13 @@ async def h_download(r):
     for d in (here / "dist", here, here.parent, here.parent / "dist", pathlib.Path("/opt/chc-harness/dist")):
         try: cands += sorted(d.glob("chc-harness-*.tar.gz"))
         except Exception: pass
-    pkg = cands
+    def _pk(path):
+        m = re.search(r"chc-harness-(\d+(?:\.\d+)*)\.tar\.gz$", path.name)
+        parts = tuple(int(x) for x in m.group(1).split(".")) if m else (0,)
+        try: mt = path.stat().st_mtime
+        except Exception: mt = 0.0
+        return (parts, mt)
+    pkg = sorted(set(cands), key=_pk)   # version-aware, not lexicographic: 3.6.10 > 3.6.9
     if pkg:
         f = pkg[-1]
         return web.FileResponse(f, headers={"Content-Disposition":
@@ -4228,6 +4237,12 @@ async def h_free(r):
 <p style="color:var(--dim)">It is not an image generator, and we say so instead of pretending. It is not a
 $20 subscription you forget about — the free plan has no card attached at all. And it is not a black box:
 every account can verify the signed record of what the house shipped.</p>
+<h2 style="margin-top:36px;color:var(--neo)">CHECK US BEFORE YOU TRUST US</h2>
+<p style="color:var(--dim)">The source is public: one Python file, the whole thing, including the receipt
+code that signs every record. You can read it, run an unmodified copy on your own machine, and verify the
+chain yourself instead of believing a badge:
+<a href="https://github.com/CHCDOLADEEPSEEKMKSEC/chc-harness" style="color:var(--neo)">github.com/CHCDOLADEEPSEEKMKSEC/chc-harness</a>.
+The licence is restrictive on purpose — read and run, not repackage — and it says so in plain English.</p>
 <h2 style="margin-top:36px;color:var(--neo)">WHEN YOU WANT MORE</h2>
 <p style="color:var(--dim)">QWEN+ is <b>$5 a month</b> for 1,200 calls a day. The DeepSeek top-up is
 <b>$5 once</b> for $2.50 of DeepSeek usage — a one-off, not a subscription. Self-host is free and gives you

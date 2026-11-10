@@ -4747,7 +4747,7 @@ def smtp_conf():
     except Exception:
         return "", ""
 
-MAIL_API_ENV = pathlib.Path(os.environ.get("CHC_AI_MAIL_API_ENV", "/opt/chc-ai/mailapi.env"))
+MAIL_API_ENV = pathlib.Path(os.environ.get("CHC_AI_MAIL_API_ENV") or (str(DBP.parent / "mailapi.env") if (DBP.parent / "mailapi.env").exists() else "/opt/chc-ai/mailapi.env"))
 
 def mail_api_conf():
     try:

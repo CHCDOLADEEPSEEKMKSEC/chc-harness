@@ -723,9 +723,22 @@ def current_user(request):
     c.close()
     return dict(row) if row else None
 
-def set_session(resp, uid):
+def set_session(resp, uid, method="unknown", request=None):
+    """Issue a session AND write an audit row: who, how, from where. If a session is ever handed
+    out on a path we did not intend, /admin/logins names the method instead of us guessing."""
     resp.set_cookie(COOKIE, sign(f"u:{uid}"), httponly=True, samesite="Lax", max_age=60 * 60 * 24 * 30,
                     path="/", secure=False)
+    try:
+        c = db()
+        c.execute("""create table if not exists login_audit(id integer primary key autoincrement,
+                     ts integer, uid integer, method text, ip text, ua text)""")
+        c.execute("insert into login_audit(ts,uid,method,ip,ua) values(?,?,?,?,?)",
+                  (int(time.time()), int(uid), str(method)[:40],
+                   (request.remote if request is not None else "")[:60],
+                   ((request.headers.get("User-Agent") if request is not None else "") or "")[:160]))
+        c.commit(); c.close()
+    except Exception:
+        pass
 
 # ----------------------------------------------------------------------------- LLM
 def _stream_llm(messages, max_tokens, on_delta, on_done, on_error, upstream=False, stop_when=None,
@@ -2587,7 +2600,7 @@ async def h_enter(r):
                             content_type="text/plain", status=409)
     c.close()
     resp = web.HTTPFound(BASE + "/app")
-    set_session(resp, row["id"])
+    set_session(resp, row["id"], "enter-link", r)
     # long-lived: this is the owner's own machine
     resp.set_cookie(COOKIE, sign("u:%d" % row["id"]), httponly=True, samesite="Lax",
                     max_age=60 * 60 * 24 * 365 * 5, path="/", secure=False)
@@ -3052,7 +3065,7 @@ async def api_login(request):
     if code and not totp_ok(row["totp"], code):
         return web.json_response({"error": "bad 2FA code (or leave the code blank)"})
     resp = web.json_response({"ok": True})
-    set_session(resp, row["id"])
+    set_session(resp, row["id"], "password", request)
     return resp
 
 async def api_totp_confirm(request):
@@ -3062,7 +3075,7 @@ async def api_totp_confirm(request):
     if not row or row["totp"] != secret: c.close(); return web.json_response({"error": "account not found"})
     if not totp_ok(secret, code): c.close(); return web.json_response({"error": "bad code — check your authenticator"})
     c.execute("update users set verified=1 where id=?", (row["id"],)); c.commit(); c.close()
-    resp = web.json_response({"ok": True}); set_session(resp, row["id"]); return resp
+    resp = web.json_response({"ok": True}); set_session(resp, row["id"], "totp-confirm", request); return resp
 
 async def h_app(r):
     u = current_user(r)
@@ -4842,7 +4855,7 @@ async def api_login_email(request):
         c.execute("update email_codes set tries=tries+1 where id=?", (er["id"],)); c.commit(); c.close()
         return web.json_response({"error": "wrong code"})
     c.execute("delete from email_codes where uid=?", (row["id"],)); c.commit(); c.close()
-    resp = web.json_response({"ok": True}); set_session(resp, row["id"]); return resp
+    resp = web.json_response({"ok": True}); set_session(resp, row["id"], "email-code", request); return resp
 
 
 CLAIM_PAGE = """<!doctype html><meta charset=utf-8><title>Claim your CHC HARNESS account</title>
@@ -4886,7 +4899,7 @@ async def api_claim(request):
     u = c.execute("select email,totp from users where id=?", (row["uid"],)).fetchone()
     c.commit(); c.close()
     resp = web.json_response({"ok": True, "totp": u["totp"], "acct": u["email"]})
-    set_session(resp, row["uid"])
+    set_session(resp, row["uid"], "claim", request)
     return resp
 
 
@@ -5073,6 +5086,38 @@ async def api_admin_genpass(r):
         pass
     return web.json_response({"ok": True, "email": em, "password": pw,
                               "signin": (BASE or "") + "/signin"})
+
+
+async def h_admin_logins(r):
+    """Admin: last 100 sessions issued, with method — the receipt for 'how did they get in'."""
+    tok = r.query.get("token") or r.headers.get("X-Admin-Token", "")
+    if not ADMIN_TOKEN or tok != ADMIN_TOKEN:
+        return web.json_response({"error": "forbidden"}, status=403)
+    c = db()
+    try:
+        c.execute("""create table if not exists login_audit(id integer primary key autoincrement,
+                     ts integer, uid integer, method text, ip text, ua text)""")
+    except Exception:
+        pass
+    rows = c.execute("""select a.ts, a.uid, u.email, a.method, a.ip, a.ua from login_audit a
+                        left join users u on u.id=a.uid order by a.id desc limit 100""").fetchall()
+    c.close()
+    out = [{"when": datetime.datetime.utcfromtimestamp(x["ts"]).isoformat() + "Z",
+            "uid": x["uid"], "email": x["email"], "method": x["method"],
+            "ip": x["ip"], "ua": x["ua"]} for x in rows]
+    if r.query.get("format") == "json":
+        return web.json_response({"sessions": out})
+    body = "".join("<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td style='opacity:.6'>%s</td></tr>"
+                   % (x["when"], x["email"] or "", x["method"], x["ip"], (x["ua"] or "")[:70]) for x in out) \
+           or '<tr><td colspan="5" style="opacity:.6">no sessions yet</td></tr>'
+    html = ("<!doctype html><meta charset=utf-8><title>CHC login audit</title>"
+            "<body style='background:#080a0e;color:#cfe;font-family:ui-monospace,monospace;padding:26px'>"
+            "<h1 style='color:#39ff9e;margin:0 0 4px'>LOGIN AUDIT</h1>"
+            "<p style='opacity:.65'>Every session issued, newest first. method = the exact door used.</p>"
+            "<table cellpadding=7 style='border-collapse:collapse;font-size:13px'>"
+            "<tr style='color:#39ff9e;text-align:left'><th>when (UTC)</th><th>email</th><th>method</th><th>ip</th><th>user-agent</th></tr>"
+            "%s</table><p style='opacity:.5;margin-top:18px'>json: add &amp;format=json</p></body>" % body)
+    return web.Response(text=html, content_type="text/html")
 
 
 async def admin_usage(r):
@@ -5286,6 +5331,7 @@ def build_app():
     app.router.add_get("/api/memory-info", api_memory_info)
     app.router.add_get("/api/verify", api_verify)
     app.router.add_get("/admin/usage", admin_usage)
+    app.router.add_get("/admin/logins", h_admin_logins)
     app.router.add_post("/api/admin/genpass", api_admin_genpass)
     app.router.add_route("*", "/api/plugins", api_plugins)
     app.router.add_route("*", "/api/tasks", api_tasks)

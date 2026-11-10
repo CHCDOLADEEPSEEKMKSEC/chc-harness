@@ -6,6 +6,29 @@ set -euo pipefail
 PORT="${CHC_PORT:-8895}"
 HOST="${CHC_HOST:-127.0.0.1}"
 PREFIX="${CHC_PREFIX:-/opt/chc-harness}"
+UNIT_NAME="${CHC_UNIT:-chc-harness}"
+OWNER_EMAIL="${CHC_OWNER:-}"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dir)   PREFIX="$2"; shift 2 ;;
+    --port)  PORT="$2"; shift 2 ;;
+    --user)  SERVICE_USER="$2"; shift 2 ;;
+    --owner) OWNER_EMAIL="$2"; shift 2 ;;
+    --unit)  UNIT_NAME="$2"; shift 2 ;;
+    -h|--help)
+      cat <<'USAGE'
+CHC HARNESS installer
+  --dir PATH     install here            (default /opt/chc-harness)
+  --port N       listen port             (default 8895)
+  --user NAME    service user            (default: you)
+  --owner EMAIL  owner account email      (default: asked, or first account)
+  --unit NAME    systemd unit name       (default chc-harness)
+or set CHC_PREFIX / CHC_PORT / CHC_USER / CHC_OWNER / CHC_UNIT.
+USAGE
+      exit 0 ;;
+    *) die "unknown argument: $1 (use --help)" ;;
+  esac
+done
 # find the model server that is actually running (ports differ per box: ollama 11434, proxy 11436)
 if [ -z "${CHC_LLM_URL:-}" ]; then
   for p in 11434 11436 11435 8000 8080; do
@@ -24,7 +47,7 @@ print(pick)' 2>/dev/null)"
 fi
 CHC_MODEL_PICK="${CHC_MODEL:-${MODEL:-local}}"
 MODEL="${CHC_MODEL:-local}"
-SERVICE_USER="${CHC_USER:-$(id -un)}"
+SERVICE_USER="${SERVICE_USER:-${CHC_USER:-$(id -un)}}"
 
 say() { printf '\033[1;36m[chc]\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31m[chc]\033[0m %s\n' "$*" >&2; exit 1; }
@@ -49,16 +72,12 @@ command -v systemctl >/dev/null || die "systemd is required (use --user mode man
 
 say "installing into $PREFIX (service user: $SERVICE_USER)"
 sudo mkdir -p "$PREFIX"/{files,work}
-sudo cp app.py "$PREFIX/app.py"
-[ -f VERSION ] && sudo cp VERSION "$PREFIX/VERSION"
-sudo cp init_vault.py "$PREFIX/init_vault.py"
-sudo cp seal.py "$PREFIX/seal.py"
-sudo cp recall.py "$PREFIX/recall.py"
-sudo cp senses.py "$PREFIX/senses.py"
-sudo cp paddy.py "$PREFIX/paddy.py"
-sudo cp chat_memory_mcp.py "$PREFIX/chat_memory_mcp.py"
+[ -f app.py ] || die "app.py missing from the package"
+for f in app.py VERSION init_vault.py seal.py recall.py senses.py paddy.py chat_memory_mcp.py smoke_test.py; do
+  if [ -f "$f" ]; then sudo cp "$f" "$PREFIX/$f"; else say "optional file not in package: $f (skipped)"; fi
+done
 sudo python3 -m venv "$PREFIX/venv" 2>/dev/null || true
-sudo "$PREFIX/venv/bin/pip" -q install --upgrade pip aiohttp || die "pip install aiohttp failed"
+sudo "$PREFIX/venv/bin/pip" -q install --upgrade pip aiohttp cryptography || die "pip install aiohttp cryptography failed"
 
 # secrets: session secret + admin token for the billing report, generated locally, never shared
 [ -f "$PREFIX/secret" ] || (head -c 48 /dev/urandom | base64 | tr -d '/+=' | head -c 48 | sudo tee "$PREFIX/secret" >/dev/null)
@@ -67,7 +86,7 @@ sudo chmod 600 "$PREFIX/secret" "$PREFIX/admin.token"
 sudo chown -R "$SERVICE_USER" "$PREFIX"
 
 ADMIN_TOKEN="$(sudo cat "$PREFIX/admin.token")"
-sudo tee "/etc/systemd/system/chc-harness.service" >/dev/null <<UNIT
+sudo tee "/etc/systemd/system/$UNIT_NAME.service" >/dev/null <<UNIT
 [Unit]
 Description=CHC HARNESS (self-hosted AI harness)
 After=network-online.target
@@ -86,13 +105,40 @@ WantedBy=multi-user.target
 UNIT
 
 sudo systemctl daemon-reload
-sudo systemctl enable chc-harness.service
-sudo systemctl restart chc-harness.service   # install = restart: a running unit keeps the OLD code in memory
+sudo systemctl enable "$UNIT_NAME.service"
+sudo systemctl restart "$UNIT_NAME.service"   # install = restart: a running unit keeps the OLD code in memory
 sleep 2
-say "service: $(systemctl is-active chc-harness.service)"
-say "vault:   $(sudo "$PREFIX/venv/bin/python" "$PREFIX/init_vault.py" --dir "$PREFIX/vault" --owner "$SERVICE_USER" | head -1)"
+say "service: $(systemctl is-active "$UNIT_NAME.service")"
+
+# customer vault: own keypair, own chain, own verify.sh — the house chain is never involved
+sudo mkdir -p "$PREFIX/vault"/{receipts,keys,tools,master,datasets}
+sudo cp seal.py "$PREFIX/vault/tools/seal.py"
+sudo chmod 755 "$PREFIX/vault/tools/seal.py"
+if [ ! -s "$PREFIX/vault/receipts/chain.jsonl" ]; then
+  sudo env CHC_SEAL_ROOT="$PREFIX/vault" "$PREFIX/venv/bin/python" "$PREFIX/vault/tools/seal.py" init >/dev/null 2>&1 || die "vault key/chain init failed"
+  sudo env CHC_SEAL_ROOT="$PREFIX/vault" "$PREFIX/venv/bin/python" "$PREFIX/vault/tools/seal.py" \
+       append --kind milestone --subject "vault initialised" --data '{"owner":"'"${OWNER_EMAIL:-unset}"'"}' >/dev/null 2>&1 || true
+fi
+printf '#!/usr/bin/env bash
+cd "%s" && CHC_SEAL_ROOT="%s" ./venv/bin/python vault/tools/seal.py verify\n' "$PREFIX" "$PREFIX/vault" | sudo tee "$PREFIX/vault/verify.sh" >/dev/null
+sudo chmod 755 "$PREFIX/vault/verify.sh"
+VAULT_LINE="$(sudo env CHC_SEAL_ROOT="$PREFIX/vault" "$PREFIX/venv/bin/python" "$PREFIX/vault/tools/seal.py" verify 2>&1 | head -1)"
+say "vault:   $VAULT_LINE"
 # WHO OWNS THIS INSTALL — recorded so /enter signs in THEIR account, not "whoever is in the db".
-printf '%s' "$OWNER_EMAIL" | sudo tee "$PREFIX/owner" >/dev/null
+if [ -z "$OWNER_EMAIL" ]; then
+  if [ -t 0 ]; then read -r -p "[chc] owner email (who signs in with /enter): " OWNER_EMAIL || true; fi
+fi
+if [ -z "$OWNER_EMAIL" ]; then
+  OWNER_EMAIL="$(sudo "$PREFIX/venv/bin/python" - "$PREFIX/chc.db" <<'PY2' 2>/dev/null || true
+import sqlite3,sys
+try:
+    c=sqlite3.connect(sys.argv[1]); r=c.execute("select email from users order by id limit 1").fetchone()
+    print(r[0] if r else "")
+except Exception: print("")
+PY2
+)"
+fi
+if [ -n "$OWNER_EMAIL" ]; then printf '%s' "$OWNER_EMAIL" | sudo tee "$PREFIX/owner" >/dev/null; else say "owner: not set yet (run: echo you@example.com | sudo tee $PREFIX/owner)"; fi
 sudo chmod 644 "$PREFIX/owner"
 say "owner:   $OWNER_EMAIL   (recorded in $PREFIX/owner)"
 OWNER_LOGIN="$(sudo "$PREFIX/venv/bin/python" "$PREFIX/app.py" --db "$PREFIX/chc.db" \

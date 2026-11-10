@@ -13,7 +13,7 @@ while [ $# -gt 0 ]; do
     --dir)   PREFIX="$2"; shift 2 ;;
     --port)  PORT="$2"; shift 2 ;;
     --user)  SERVICE_USER="$2"; shift 2 ;;
-    --owner) OWNER_EMAIL="$2"; shift 2 ;;
+    --owner|--owner-email|--email) OWNER_EMAIL="$2"; shift 2 ;;
     --unit)  UNIT_NAME="$2"; shift 2 ;;
     -h|--help)
       cat <<'USAGE'

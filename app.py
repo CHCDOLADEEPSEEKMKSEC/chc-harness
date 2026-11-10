@@ -4748,11 +4748,17 @@ async def api_email_code(request):
                               "msg": "code sent to your email" if ok else "email sending not configured yet — use the authenticator code"})
 
 async def api_magic_request(request):
-    """Public: mint a one-click login link for an account and email it.
-    If mail is not configured/sent AND CHC_AI_SHOW_LINKS=1, return the link so the
-    operator can hand it over without email (test/self-host convenience)."""
+    """Request a one-click login link for an account.
+
+    SECURITY: the link goes to the account's own email address and never into the HTTP response.
+    It used to be echoed back when mail was not configured (CHC_AI_SHOW_LINKS=1), which meant
+    anyone could POST any email address and be handed a working session — account takeover.
+    Only an ADMIN token holder may have the link printed back to them."""
     d = await request.json()
     acct = (d.get("acct") or "").strip().lower()
+    if not acct or len(acct) < 3:
+        return web.json_response({"error": "email required"}, status=400)
+    admin = admin_token_ok(request)
     c = db()
     row = c.execute("select id, email from users where email=? or lower(handle)=?", (acct, acct)).fetchone()
     if not row:
@@ -4778,15 +4784,17 @@ async def api_magic_request(request):
                         sm.login(sender, pw); sm.send_message(_mk_mail(sender, row["email"], "Your CHC HARNESS login link", body))
                 except Exception:
                     with _s.SMTP("smtp.gmail.com", 587, timeout=20) as sm:
-                        sm.starttls(); sm.login(sender, pw)
-                        sm.send_message(_mk_mail(sender, row["email"], "Your CHC HARNESS login link", body))
+                        sm.starttls(); sm.login(sender, pw); sm.send_message(_mk_mail(sender, row["email"], "Your CHC HARNESS login link", body))
                 sent = True
     except Exception:
         sent = False
-    out = {"ok": True, "emailed": sent}
-    if not sent and os.environ.get("CHC_AI_SHOW_LINKS", "0") == "1":
-        out["link"] = link
-    return web.json_response(out)
+    back = {"ok": True, "sent": sent}
+    if not sent:
+        back["detail"] = "mail is not configured on this server — ask the admin for a link"
+    # the link is never handed to an unauthenticated caller, whoever's address they typed
+    if admin:
+        back["link"] = link
+    return web.json_response(back)
 
 async def api_login_email(request):
     d = await request.json(); acct = (d.get("acct") or "").strip().lower(); code = (d.get("code") or "").strip()

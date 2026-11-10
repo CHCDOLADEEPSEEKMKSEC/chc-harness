@@ -5279,6 +5279,29 @@ def _is_infra_path(path):
     return False
 
 @web.middleware
+async def gate_auth_mw(request, handler):
+    """The web instance authenticates email+password and passes X-Chc-User.
+    With CHC_TRUST_GATE=1 that identity IS the login: no second sign-in."""
+    if os.environ.get("CHC_TRUST_GATE") == "1":
+        who = (request.headers.get("X-Chc-User") or "").strip().lower()
+        if who and "@" in who and current_user(request) is None:
+            c = db()
+            row = c.execute("select id from users where lower(email)=?", (who,)).fetchone()
+            if not row:
+                salt = new_salt()
+                c.execute("insert into users(email,handle,pw,salt,totp,plan,created,verified) values(?,?,?,?,?,?,?,1)",
+                          (who, who.split("@")[0][:24], pw_hash(secrets.token_hex(16), salt), salt,
+                           secrets.token_hex(10), "free", now()))
+                c.commit()
+                row = c.execute("select id from users where lower(email)=?", (who,)).fetchone()
+            c.close()
+            resp = await handler(request)
+            set_session(resp, row["id"], "web-gate", request)
+            return resp
+    return await handler(request)
+
+
+@web.middleware
 async def infra_deny_mw(request, handler):
     """Infrastructure is never a customer surface: 403, always, with no detail."""
     if _is_infra_path(request.path):
@@ -5298,7 +5321,7 @@ async def no_store_mw(request, handler):
 
 
 def build_app():
-    app = web.Application(middlewares=[infra_deny_mw, no_store_mw],client_max_size=4 * 1024 * 1024)
+    app = web.Application(middlewares=[gate_auth_mw, infra_deny_mw, no_store_mw],client_max_size=4 * 1024 * 1024)
     app.router.add_get("/", h_index)
     app.router.add_get("/health", h_health)
     app.router.add_get("/download", h_download)

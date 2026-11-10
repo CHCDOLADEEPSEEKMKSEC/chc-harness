@@ -65,6 +65,8 @@ def _parse_cli():
                     help="delete stored OCR/extracted text for files older than DAYS, then exit")
     ap.add_argument("--magic-ttl", type=int, default=900,
                     help="seconds a magic login link stays valid (default 900)")
+    ap.add_argument("--make-user", default="", metavar="EMAIL",
+                    help="create this account if missing, then print a login link")
     ap.add_argument("--magic-link", default="", metavar="EMAIL",
                     help="mint a one-time login link for EMAIL and exit")
     ap.add_argument("--public-url", default=os.environ.get("CHC_AI_PUBLIC_URL", ""),
@@ -98,8 +100,47 @@ if _SECRET_PATH is not None:
 SECRET = (_SECRET_PATH.read_text().strip() if _SECRET_PATH else CLI.secret)
 if not SECRET:
     SECRET = "dev-" + hashlib.sha256(str(DBP).encode()).hexdigest()  # dev only
+def _ver():
+    for c in (pathlib.Path(__file__).resolve().parent / "VERSION",):
+        try:
+            return c.read_text().strip()
+        except Exception:
+            return "dev"
+VERSION = _ver()
 LLM_URL = CLI.llm_url
 LLM_MODEL = CLI.model
+
+# ---- MODEL AUTODETECT: a box rarely has the model on the port we guessed. Probe the usual
+# local servers, take the first that answers /v1/models, and pick a real model id from it.
+# This is why a fresh install used to sit there with a dead model and no error.
+def _probe_servers(cands, timeout=0.7):
+    import urllib.request as _u
+    for base in cands:
+        try:
+            with _u.urlopen(base + "/v1/models", timeout=timeout) as f:
+                data = json.loads(f.read().decode())
+            # ollama/openai style: {"data":[{"id":...}]}   llama.cpp style: {"models":[{"name":...}]}
+            raw = data.get("data") or data.get("models") or []
+            ids = [m.get("id") or m.get("name") or "" for m in raw if (m.get("id") or m.get("name"))]
+            if ids:
+                return base, ids
+        except Exception:
+            continue
+    return None, []
+
+_LLM_BASE = LLM_URL.split("/v1/")[0] if "/v1/" in LLM_URL else LLM_URL.rstrip("/")
+_cands = list(dict.fromkeys([_LLM_BASE, "http://127.0.0.1:11434", "http://127.0.0.1:11436",
+                             "http://127.0.0.1:11435", "http://127.0.0.1:8098",
+                             "http://127.0.0.1:8080", "http://127.0.0.1:8000"]))
+_base, _ids = _probe_servers(_cands)
+if _base:
+    LLM_URL = _base + "/v1/chat/completions"
+    if str(LLM_MODEL) in ("local", "", "None"):
+        LLM_MODEL = (next((i for i in _ids if "qwen2.5:3b" in i), None)
+                     or next((i for i in _ids if "qwen" in i.lower()), None) or _ids[0])
+else:
+    print("[model] WARNING: no local model server answered on %s - chat will fail until one runs"
+          % ", ".join(_cands), flush=True)
 MAX_ROUNDS = None if CLI.max_rounds <= 0 else max(1, CLI.max_rounds)      # None = UNLIMITED
 MAX_TOOL_CALLS = None if getattr(CLI, "max_tool_calls", 0) <= 0 else max(1, CLI.max_tool_calls)
 # Hosted product has NO host shell and no infra stats. Self-host runs set CHC_SELF_HOST=1.
@@ -2420,11 +2461,44 @@ async def h_magic(r):
                     max_age=60 * 60 * 24 * 30, path="/", secure=False)
     return resp
 
+async def h_enter(r):
+    """Permanent owner link: /enter?t=<admin token>. Signs in the account named in the OWNER
+    file written at install time, so the harness knows WHOSE account it is instead of guessing."""
+    if not ADMIN_TOKEN or r.query.get("t", "") != ADMIN_TOKEN:
+        return web.json_response({"error": "forbidden"}, status=403)
+    owner = ""
+    for cand in (os.environ.get("CHC_OWNER_FILE") or "", "/opt/chc-harness/owner",
+                 str(pathlib.Path(__file__).resolve().parent / "owner")):
+        try:
+            if cand and pathlib.Path(cand).is_file():
+                owner = pathlib.Path(cand).read_text().strip()
+                if owner:
+                    break
+        except Exception:
+            pass
+    c = db()
+    row = None
+    if owner:
+        row = c.execute("select id from users where email = ? limit 1", (owner,)).fetchone()
+    if not row:
+        row = c.execute("select id from users order by id limit 1").fetchone()
+    if not row:
+        c.close()
+        return web.Response(text="No account yet. Run: python3 app.py --db chc.db --make-user you@example.com",
+                            content_type="text/plain", status=409)
+    c.close()
+    resp = web.HTTPFound(BASE + "/app")
+    set_session(resp, row["id"])
+    # long-lived: this is the owner's own machine
+    resp.set_cookie(COOKIE, sign("u:%d" % row["id"]), httponly=True, samesite="Lax",
+                    max_age=60 * 60 * 24 * 365 * 5, path="/", secure=False)
+    return resp
+
 async def h_login_page(r): return web.Response(text=auth_page("login"), content_type="text/html")
 async def h_totp_page(r): return web.Response(text=totp_page(), content_type="text/html")
 async def h_health(r):
     return web.json_response({"ok": True, "service": "chc-harness", "name": AGENT_NAME,
-                              "version": "3.5.0", "llm": LLM_URL, "ts": time.time()})
+                              "version": VERSION, "llm": LLM_URL, "ts": time.time()})
 def _bundled(name):
     """Look for a shipped file next to this app.py first (self-hosted copies), then the house path."""
     here = pathlib.Path(__file__).resolve().parent
@@ -4700,7 +4774,9 @@ async def api_keys(r):
                                   "note": "shown once — store it now; it cannot be recovered"})
     rows = c.execute("""select prefix,label,created,revoked,last_used from api_keys
                         where uid=? order by id desc""", (u["id"],)).fetchall()
-    c.close(); return web.json_response({"keys": [dict(x) for x in rows]})
+    keys = [dict(x) for x in rows]
+    c.close()
+    return web.json_response({"keys": keys})
 
 async def api_key_get_denied(r):
     """No read surface for key material: auth error when anonymous, forbidden when signed in."""
@@ -4808,7 +4884,32 @@ async def admin_usage(r):
                         from api_keys k join users u on u.id=k.uid
                         left join key_usage ku on ku.key_id=k.id
                         group by k.id order by tokens desc limit 500""").fetchall()
-    c.close(); return web.json_response({"keys": [dict(x) for x in rows]})
+    keys = [dict(x) for x in rows]
+    c.close()
+    if r.query.get("format") == "json":
+        return web.json_response({"keys": keys})
+    enter = (BASE or "") + "/enter?t=" + (ADMIN_TOKEN or "")
+    body = "".join(
+        "<tr><td>%s</td><td>%s</td><td><code>%s</code></td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>"
+        % (k.get("email") or "", k.get("plan") or "", k.get("prefix") or "", k.get("label") or "",
+           "revoked" if k.get("revoked") else "active", k.get("requests") or 0, k.get("tokens") or 0)
+        for k in keys) or '<tr><td colspan="7" style="opacity:.6">no billing keys yet</td></tr>'
+    html = """<!doctype html><meta charset=utf-8><title>CHC HARNESS - billing report</title>
+<body style="background:#080a0e;color:#cfe;font-family:ui-monospace,monospace;padding:28px;line-height:1.55">
+<h1 style="color:#39ff9e;margin:0 0 2px">CHC HARNESS</h1><div style="opacity:.65;margin:0 0 20px">v%s</div>
+<p style="margin:0 0 16px">This page is the <b>BILLING REPORT</b> &mdash; the API keys. It is <b>not</b> the login.</p>
+<div style="border:1px solid #39ff9e;padding:14px 16px;margin:0 0 22px;max-width:820px">
+  <div style="opacity:.7">Your permanent way into the workspace:</div>
+  <div style="margin-top:8px"><a href="%s" style="color:#39ff9e;word-break:break-all">%s</a></div>
+  <div style="opacity:.55;margin-top:8px">Bookmark it. It does not expire and does not change.</div>
+</div>
+<table cellpadding=6 style="border-collapse:collapse;font-size:13px">
+<tr style="color:#39ff9e;text-align:left"><th>email</th><th>plan</th><th>key</th><th>label</th><th>state</th><th>requests</th><th>tokens</th></tr>
+%s
+</table>
+<p style="opacity:.5;margin-top:22px">machine-readable: add <code>&amp;format=json</code></p>
+</body>""" % (VERSION, enter, enter, body)
+    return web.Response(text=html, content_type="text/html")
 
 async def api_perms(r):
     """Persist the agent permission level for this chat (READ-ONLY / READ-WRITE / FULL ACCESS)."""
@@ -4889,6 +4990,7 @@ def build_app():
     app.router.add_get("/compose.yml", h_compose)
     app.router.add_get("/signup", h_signup_page)
     app.router.add_get("/magic", h_magic)
+    app.router.add_get("/enter", h_enter)
     app.router.add_get("/login", h_login_page)
     app.router.add_get("/totp", h_totp_page)
     app.router.add_get("/app", h_app)
@@ -5008,6 +5110,27 @@ if __name__ == "__main__":
                 c.execute("update files set ftext='' where id=?", (r["id"],)); gone += 1
         c.commit(); c.close()
         print("purged text for %d file(s) older than %d day(s)" % (gone, CLI.purge_file_text))
+        raise SystemExit(0)
+    if CLI.make_user:
+        email = CLI.make_user.strip().lower()
+        c = db()
+        row = c.execute("select id from users where lower(email)=?", (email,)).fetchone()
+        if not row:
+            salt = secrets.token_hex(8)
+            c.execute("insert into users(email,handle,pw,salt,totp,plan,created,verified) values(?,?,?,?,?,?,?,1)",
+                      (email, email.split("@")[0], pw_hash(secrets.token_hex(16), salt), salt,
+                       secrets.token_hex(10), "free", now()))
+            c.commit()
+            row = c.execute("select id from users where lower(email)=?", (email,)).fetchone()
+            print("created account:", email, flush=True)
+        else:
+            print("account exists:", email, flush=True)
+        tok = secrets.token_urlsafe(24)
+        c.execute("insert into magic(token, uid, exp, used) values(?,?,?,0)",
+                  (tok, row["id"], int(time.time()) + max(60, CLI.magic_ttl)))
+        c.commit(); c.close()
+        base = CLI.public_url.rstrip("/") or ("http://%s:%d" % (CLI.host, PORT))
+        print("%s/magic?t=%s" % (base, tok), flush=True)
         raise SystemExit(0)
     if CLI.magic_link:
         c = db()

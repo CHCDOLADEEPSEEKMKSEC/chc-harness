@@ -3985,6 +3985,7 @@ PUBLIC_PAGES = [
     ("/blog/free-ai-no-credit-card", "Free AI with no credit card", "60 calls a day, email only."),
     ("/blog/self-host-ai-workspace", "Self-hosting an AI workspace", "What you actually need."),
     ("/blog/ai-workspace-with-files", "Why files matter more than model size", "A workspace, not a chat box."),
+    ("/blog/chc-harness-on-github", "CHC HARNESS on GitHub — with the receipts", "Source public, licence restrictive."),
 ]
 
 
@@ -4022,6 +4023,23 @@ async def h_verify_put(r):
 
 
 POSTS = {
+ "chc-harness-on-github": ("We put CHC HARNESS on GitHub — with the receipts", "2026-11-10",
+   "The full source is public: one file, its own Ed25519 receipt chain. Read it, run it unmodified — it stays ours.",
+   """<p>As of today the whole thing is public: <a href="https://github.com/CHCDOLADEEPSEEKMKSEC/chc-harness">github.com/CHCDOLADEEPSEEKMKSEC/chc-harness</a>. One repo, seventeen files, the same build that runs this site.</p>
+<p>We did it for one reason: a claim you cannot inspect is a claim you have to take on faith. "Your records are signed and verifiable" means nothing if you cannot see the code that signs them. Now you can — including the receipt tooling.</p>
+<h3>What is in there</h3>
+<ul><li><b>app.py</b> — the whole application: chat, workspace, files, tools, shell sandbox, signup, billing, admin.</li>
+<li><b>tools/seal.py</b> — the append-only receipt chain. Pure-Python Ed25519, no dependencies. It signs each entry and pins the previous one's hash, so editing history breaks the chain instead of hiding in it.</li>
+<li><b>tools/init_vault.py</b> — creates your own vault: your key, your chain, your files. Nothing of ours comes with it.</li>
+<li><b>install.sh, Dockerfile, docker-compose.yml</b> — one command, or a container, or neither.</li></ul>
+<h3>What is not in there</h3>
+<p>No telemetry, no analytics, no phone-home, no obfuscated blob, no "pro" module holding the real features. If it runs here, it runs there. What is missing is the boring part of a business: licences, support contracts, a card rail, an audit. Those are not code.</p>
+<h3>The licence is deliberately not open source</h3>
+<p>Read it, clone it, run an <b>unmodified</b> copy for your own non-commercial self-hosting. Modifying it, redistributing it, selling it, or hosting it for other people needs our written permission. That is not us being precious about lines of code — the receipt chain and the workspace design are the product, and a permissive licence would let anyone repackage them as their own.</p>
+<p>The licence file says it in plain English. No lawyer required to understand it, though one wrote the wording.</p>
+<h3>Verify us, do not believe us</h3>
+<p>The chain on this box is public numbers, not a copy of anything: current count, head hash and merkle root are re-stamped whenever we make a claim. Anyone can hold those numbers and check later that the record did not change underneath them.</p>
+<p>That is the whole idea, really: not "trust our AI", but "here is the code, here is the chain, here are the numbers — check them yourself and tell us if we are wrong."</p>"""),
  "free-ai-no-credit-card": ("Free AI with no credit card — 60 calls a day", "2026-11-09",
    "Most 'free' AI tools want a card before you type anything. Here is a free tier that really is free: email only, 60 calls a day, 1 GB workspace.",
    """<p>Every second AI site says "free" and then asks for a card. The free ones that do not usually have a catch: a 3-day trial, a queued model, or your chats used as training data.</p>
@@ -4155,7 +4173,7 @@ async def h_blog(r):
     items = "".join(
         '<li style="margin:18px 0"><a href="%s/blog/%s"><b style="font-size:17px">%s</b></a>'
         '<div style="color:var(--dim);font-size:13px">%s</div></li>' % (BASE, slug, t, d)
-        for slug, (t, _dt, d, _b) in POSTS.items())
+        for slug, (t, _dt, d, _b) in sorted(POSTS.items(), key=lambda kv: kv[1][1], reverse=True))
     body = f"""
 <div class="wrap" style="max-width:760px;padding:64px 20px">
 <h1 class=wordmark style="font-size:clamp(28px,6vw,52px);color:var(--neo)">NOTES</h1>

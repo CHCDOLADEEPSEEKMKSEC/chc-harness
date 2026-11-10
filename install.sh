@@ -50,6 +50,7 @@ command -v systemctl >/dev/null || die "systemd is required (use --user mode man
 say "installing into $PREFIX (service user: $SERVICE_USER)"
 sudo mkdir -p "$PREFIX"/{files,work}
 sudo cp app.py "$PREFIX/app.py"
+[ -f VERSION ] && sudo cp VERSION "$PREFIX/VERSION"
 sudo cp init_vault.py "$PREFIX/init_vault.py"
 sudo cp seal.py "$PREFIX/seal.py"
 sudo cp recall.py "$PREFIX/recall.py"
@@ -85,7 +86,8 @@ WantedBy=multi-user.target
 UNIT
 
 sudo systemctl daemon-reload
-sudo systemctl enable --now chc-harness.service
+sudo systemctl enable chc-harness.service
+sudo systemctl restart chc-harness.service   # install = restart: a running unit keeps the OLD code in memory
 sleep 2
 say "service: $(systemctl is-active chc-harness.service)"
 say "vault:   $(sudo "$PREFIX/venv/bin/python" "$PREFIX/init_vault.py" --dir "$PREFIX/vault" --owner "$SERVICE_USER" | head -1)"

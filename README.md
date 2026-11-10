@@ -73,8 +73,7 @@ A receipt is not a log. `verify` is the point: edit the file and the chain fails
 
 ## License
 
-AGPL-3.0-or-later — see [LICENSE](LICENSE). Use it, fork it, run it, sell services on it;
-but if you offer a modified version as a network service, publish the source.
+MIT — see [LICENSE](LICENSE). Use it, fork it, run it, ship it inside your own product.
 
 ## Links
 

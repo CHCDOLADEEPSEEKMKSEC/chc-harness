@@ -2573,38 +2573,82 @@ async def h_magic(r):
                     max_age=60 * 60 * 24 * 30, path="/", secure=False)
     return resp
 
+ENTER_LOGIN_PAGE = """<!doctype html><meta charset=utf-8><title>CHC HARNESS - sign in</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+ body{background:#05060a;color:#e8edf7;font:15px/1.6 system-ui;max-width:430px;margin:7vh auto;padding:0 20px}
+ h1{font:900 30px/1 system-ui;color:#39ff9e;letter-spacing:.02em;margin:0 0 4px}
+ p.sub{color:#8892a6;margin:0 0 22px}
+ label{display:block;color:#8892a6;font-size:12px;margin:14px 0 6px;text-transform:uppercase;letter-spacing:.08em}
+ input{width:100%;background:#0b0f16;border:1px solid #1d2230;border-radius:10px;color:#e8edf7;padding:12px;font:15px inherit}
+ button{width:100%;margin-top:20px;padding:13px 18px;border:0;border-radius:11px;cursor:pointer;
+   background:linear-gradient(135deg,#39ff9e,#14c47a);color:#04110a;font-weight:800;font-size:15px}
+ .err{color:#ff7b72;font-size:13px;min-height:18px;margin-top:12px}
+ .foot{color:#5d6779;font-size:12px;margin-top:26px;text-align:center}
+ a{color:#39ff9e;text-decoration:none}
+</style>
+<h1>CHC HARNESS</h1>
+<p class="sub">One link. Email + password. That is the whole login.</p>
+<label>email</label><input id="em" autocomplete="username" autofocus>
+<label>password</label><input id="pw" type="password" autocomplete="current-password">
+<button id="go">SIGN IN</button>
+<div class="err" id="msg"></div>
+<p class="foot">No account on this box yet? <a href="/signup">CREATE ONE</a></p>
+<script>
+const go=document.getElementById('go'), msg=document.getElementById('msg');
+async function doLogin(){
+  msg.textContent='';
+  const email=document.getElementById('em').value.trim(), pw=document.getElementById('pw').value;
+  if(!email||!pw){msg.textContent='email and password required';return;}
+  go.disabled=true;
+  try{
+    const r=await fetch('/api/login',{method:'POST',headers:{'content-type':'application/json'},
+      body:JSON.stringify({email,pw})});
+    const j=await r.json();
+    if(j.ok){location='/app';return;}
+    msg.textContent=j.error||'login failed';
+  }catch(e){msg.textContent='network error';}
+  go.disabled=false;
+}
+go.onclick=doLogin;
+document.addEventListener('keydown',e=>{if(e.key==='Enter')doLogin();});
+</script>"""
+
+
 async def h_enter(r):
-    """Permanent owner link: /enter?t=<admin token>. Signs in the account named in the OWNER
-    file written at install time, so the harness knows WHOSE account it is instead of guessing."""
-    if not ADMIN_TOKEN or r.query.get("t", "") != ADMIN_TOKEN:
-        return web.json_response({"error": "forbidden"}, status=403)
-    owner = ""
-    for cand in (os.environ.get("CHC_OWNER_FILE") or "", "/opt/chc-harness/owner",
-                 str(pathlib.Path(__file__).resolve().parent / "owner")):
-        try:
-            if cand and pathlib.Path(cand).is_file():
-                owner = pathlib.Path(cand).read_text().strip()
-                if owner:
-                    break
-        except Exception:
-            pass
-    c = db()
-    row = None
-    if owner:
-        row = c.execute("select id from users where email = ? limit 1", (owner,)).fetchone()
-    if not row:
-        row = c.execute("select id from users order by id limit 1").fetchone()
-    if not row:
+    """/enter — THE permanent link. Same URL for ever, no token needed.
+
+    No ?t=  -> a plain email + password form, posts to /api/login, lands in /app.
+    ?t=<admin token> -> owner bootstrap: signs in the account in the OWNER file once
+    (used by the installer so the first link works before a password exists)."""
+    tok = r.query.get("t", "")
+    if tok and ADMIN_TOKEN and tok == ADMIN_TOKEN:
+        owner = ""
+        for cand in (os.environ.get("CHC_OWNER_FILE") or "", "/opt/chc-harness/owner",
+                     str(pathlib.Path(__file__).resolve().parent / "owner")):
+            try:
+                if cand and pathlib.Path(cand).is_file():
+                    owner = pathlib.Path(cand).read_text().strip()
+                    if owner:
+                        break
+            except Exception:
+                pass
+        c = db()
+        row = None
+        if owner:
+            row = c.execute("select id from users where lower(email)=lower(?) limit 1", (owner,)).fetchone()
+        if not row:
+            row = c.execute("select id from users order by id limit 1").fetchone()
+        if not row:
+            c.close()
+            return web.HTTPFound(BASE + "/enter")
         c.close()
-        return web.Response(text="No account yet. Run: python3 app.py --db chc.db --make-user you@example.com",
-                            content_type="text/plain", status=409)
-    c.close()
-    resp = web.HTTPFound(BASE + "/app")
-    set_session(resp, row["id"], "enter-link", r)
-    # long-lived: this is the owner's own machine
-    resp.set_cookie(COOKIE, sign("u:%d" % row["id"]), httponly=True, samesite="Lax",
-                    max_age=60 * 60 * 24 * 365 * 5, path="/", secure=False)
-    return resp
+        resp = web.HTTPFound(BASE + "/app")
+        set_session(resp, row["id"], "enter-link", r)
+        return resp
+    if tok:
+        return web.json_response({"error": "bad token"}, status=403)
+    return web.Response(text=ENTER_LOGIN_PAGE, content_type="text/html")
 
 async def h_signin(r):
     """Plain email + password sign-in — one page, two fields, no code needed."""

@@ -153,7 +153,7 @@ say "owner:   $OWNER_EMAIL   (recorded in $PREFIX/owner)"
 # login is EMAIL + generated PASSWORD on /signin — no magic links, no "anyone with the email" entry
 PW_LINE="$(sudo "$PREFIX/venv/bin/python" "$PREFIX/app.py" --db "$PREFIX/chc.db" --set-password "$OWNER_EMAIL" 2>/dev/null | tr '\n' ' ')"
 OWNER_PW="$(printf '%s' "$PW_LINE" | sed -n 's/.*PASSWORD=\([^ ]*\).*/\1/p')"
-say "login:   http://$HOST:$PORT/signin"
+say "LINK:    http://$HOST:$PORT/enter          (permanent - this one link is the login, every time)"
 say "email:   $OWNER_EMAIL"
 if [ -n "$OWNER_PW" ]; then say "password: $OWNER_PW   (generated once - save it now; press GENERATE NEW PASSWORD on $HOST:$PORT/admin/usage to make another)"; fi
 OWNER_LOGIN="$(sudo "$PREFIX/venv/bin/python" "$PREFIX/app.py" --db "$PREFIX/chc.db" \

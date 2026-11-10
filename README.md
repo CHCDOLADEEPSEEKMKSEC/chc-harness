@@ -25,7 +25,7 @@ signed append-only record you can check yourself.
 - **Chat** against any OpenAI-compatible endpoint — Ollama, vLLM, llama.cpp, LM Studio, or a hosted provider.
 - **Workspace**: file browse/edit, per-chat memory, plugin probes that report the truth when a plugin is missing.
 - **Shell** with a real per-tenant uid sandbox (`setpriv`), unless you run it hosted-style.
-- **Receipts**: `seal.py` appends signed entries to `receipts/chain.jsonl`; `python3 seal.py verify` proves the whole chain. Each signup gets its own vault and keypair — customer chains are never the operator's chain.
+- **Receipts**: `tools/seal.py` appends signed entries to `receipts/chain.jsonl`; `python3 tools/seal.py verify` proves the whole chain. Each signup gets its own vault and keypair — customer chains are never the operator's chain.
 - **Honest surfaces**: usage and billing keys, quota counters, an assist inbox, one-time login links.
 
 ## Quick start (self-hosted)
@@ -51,12 +51,16 @@ Behind a proxy: TLS terminates at nginx/caddy, the app serves plain HTTP on loop
 
 ## The receipt chain
 
+`tools/init_vault.py` creates the vault (chain, keypair, layout) and copies `seal.py` in:
+
 ```bash
-python3 seal.py init            # once per install
-python3 seal.py append --kind release --subject "v3.6.8" --data '{"sha":"..."}'
-python3 seal.py verify          # walks every entry, checks every signature
-python3 seal.py root            # merkle root
+python3 tools/init_vault.py --dir . --owner "your name"   # once per install
+python3 tools/seal.py append --kind note --subject "first entry" --data '{"hello":"world"}'
+python3 tools/seal.py verify       # walks every entry, checks every signature
+python3 tools/seal.py pubkey       # your public key, if someone must verify your chain
 ```
+
+Layout it creates: `receipts/chain.jsonl`, `keys/vault.key` (0600) and `keys/vault.pub`.
 
 A receipt is not a log. `verify` is the point: edit the file and the chain fails.
 

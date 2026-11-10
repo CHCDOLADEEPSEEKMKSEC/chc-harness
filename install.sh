@@ -70,13 +70,21 @@ import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)
 PY
 command -v systemctl >/dev/null || die "systemd is required (use --user mode manually if not)"
 
+# a bare Ubuntu/Debian image has python3 but NOT venv/pip — the harness needs both, so install them
+if ! python3 -c 'import venv, ensurepip' >/dev/null 2>&1; then
+  say "installing python3-venv + python3-pip (one time)"
+  sudo apt-get update -qq >/dev/null 2>&1 || true
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3-venv python3-pip >/dev/null 2>&1 \
+    || die "could not install python3-venv (run manually: sudo apt install python3-venv python3-pip)"
+fi
+
 say "installing into $PREFIX (service user: $SERVICE_USER)"
 sudo mkdir -p "$PREFIX"/{files,work}
 [ -f app.py ] || die "app.py missing from the package"
 for f in app.py VERSION init_vault.py seal.py recall.py senses.py paddy.py chat_memory_mcp.py smoke_test.py; do
   if [ -f "$f" ]; then sudo cp "$f" "$PREFIX/$f"; else say "optional file not in package: $f (skipped)"; fi
 done
-sudo python3 -m venv "$PREFIX/venv" 2>/dev/null || true
+sudo python3 -m venv "$PREFIX/venv" || die "could not create the Python venv at $PREFIX/venv"
 sudo "$PREFIX/venv/bin/pip" -q install --upgrade pip aiohttp cryptography || die "pip install aiohttp cryptography failed"
 
 # secrets: session secret + admin token for the billing report, generated locally, never shared

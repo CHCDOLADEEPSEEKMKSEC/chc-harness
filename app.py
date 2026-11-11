@@ -5055,6 +5055,57 @@ async def api_remember(r):
     return web.json_response({"ok": True, "remember_all": on})
 
 
+CHAIN_PAGE = """<!doctype html><meta charset=utf-8><title>Your chain - CHC HARNESS</title>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<style>
+body{background:#05060a;color:#e8edf7;font:15px/1.6 system-ui;max-width:640px;margin:6vh auto;padding:0 20px}
+h1{font:900 28px/1 system-ui;color:#39ff9e;letter-spacing:.02em;margin-bottom:4px}
+.sub{color:#8892a6;margin-top:0}
+.card{background:#0b0f16;border:1px solid #1d2230;border-radius:12px;padding:16px;margin:14px 0}
+.k{color:#8892a6;font-size:12px;text-transform:uppercase;letter-spacing:.08em}
+.v{font:600 15px ui-monospace,monospace;word-break:break-all;margin-bottom:10px}
+.btn{display:inline-block;padding:12px 20px;border-radius:11px;background:linear-gradient(135deg,#39ff9e,#14c47a);color:#04110a;font-weight:800;border:0;cursor:pointer;font:800 15px system-ui}
+.ok{color:#39ff9e;font-weight:800}.bad{color:#ff7b72;font-weight:800}
+pre{background:#070a0f;border:1px solid #141a26;border-radius:10px;padding:12px;overflow:auto;font-size:12px;color:#9fb3c8}
+</style>
+<h1>YOUR CHAIN</h1>
+<p class=sub>Your receipts, your key, your vault. Nobody else holds it.</p>
+<div class=card>
+  <div class=k>receipts</div><div class=v id=r>--</div>
+  <div class=k>root</div><div class=v id=rt>--</div>
+  <div class=k>last receipt</div><div class=v id=ls>--</div>
+  <div class=k>verify</div><div class=v id=st>not run yet</div>
+</div>
+<button class=btn onclick=go()>VERIFY MY CHAIN</button>
+<pre id=raw>press VERIFY</pre>
+<script>
+async function go(){
+  const st=document.getElementById('st'); st.textContent='verifying...'; st.className='v';
+  try{
+    const r=await fetch('/api/verify',{credentials:'same-origin'});
+    const d=await r.json();
+    document.getElementById('r').textContent=d.receipts??'--';
+    document.getElementById('rt').textContent=d.root||'--';
+    document.getElementById('ls').textContent=(d.last_seq!==undefined?('#'+d.last_seq+' '+d.last_kind+' - '+d.last_subject):'--');
+    st.textContent=d.ok?'VERIFIED':'FAILED'; st.className='v '+(d.ok?'ok':'bad');
+    document.getElementById('raw').textContent=d.raw||d.error||JSON.stringify(d,null,2);
+  }catch(e){
+    st.textContent='ERROR'; st.className='v bad';
+    document.getElementById('raw').textContent=String(e);
+  }
+}
+</script>"""
+
+
+async def h_chain(r):
+    u = current_user(r)
+    if not u:
+        raise web.HTTPFound(BASE + "/enter")
+    resp = web.Response(text=CHAIN_PAGE, content_type="text/html")
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
 async def api_verify(r):
     u = current_user(r)
     if not u: return web.json_response({"error": "auth"}, status=401)
@@ -5415,6 +5466,7 @@ def build_app():
     app.router.add_get("/api/version", api_version)
     app.router.add_get("/api/memory-info", api_memory_info)
     app.router.add_get("/api/verify", api_verify)
+    app.router.add_get("/chain", h_chain)
     app.router.add_get("/admin/usage", admin_usage)
     app.router.add_get("/admin/logins", h_admin_logins)
     app.router.add_post("/api/admin/genpass", api_admin_genpass)

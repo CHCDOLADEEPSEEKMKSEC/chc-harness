@@ -73,6 +73,8 @@ def _parse_cli():
                     help="use this password with --set-password instead of generating one")
     ap.add_argument("--magic-link", default="", metavar="EMAIL",
                     help="mint a one-time login link for EMAIL and exit")
+    ap.add_argument("--login-code", default="", metavar="EMAIL",
+                    help="print a fresh 6-digit login code for EMAIL on the terminal (no email sent)")
     ap.add_argument("--first-login", default="", metavar="EMAIL",
                     help="create EMAIL if missing, then email it the login link + a 6-digit code and exit")
     ap.add_argument("--public-url", default=os.environ.get("CHC_AI_PUBLIC_URL", ""),
@@ -5033,17 +5035,41 @@ async def api_qr(request):
     except Exception as e:
         return web.json_response({"error": f"qr: {e}"}, status=500)
 
+_SENDS = {}   # uid -> [timestamps]; simple in-process throttle so a bad client cannot burn the mail quota
+SEND_PER_HOUR = 6
+
+
 async def api_email_code(request):
     d = await request.json(); acct = (d.get("acct") or "").strip().lower()
     c = db(); row = c.execute("select id,email from users where email=? or lower(handle)=?", (acct, acct)).fetchone()
     if not row: c.close(); return web.json_response({"error": "no such account"})
+    uid = row["id"]; mail = row["email"]
+    now_t = int(time.time())
+    # a live code with time left is REUSED, never re-sent: this is what stops the quota burn
+    live = c.execute("select exp from email_codes where uid=? and exp>? and tries<5 order by exp desc limit 1",
+                     (uid, now_t + 60)).fetchone()
+    if live:
+        c.close()
+        return web.json_response({"ok": True, "sent": False, "to": mail, "reused": True,
+                                  "msg": "a code is already live for this account - check the last email"})
+    hist = [t for t in _SENDS.get(uid, []) if t > now_t - 3600]
+    if len(hist) >= SEND_PER_HOUR:
+        c.close()
+        wait = int(hist[0] + 3600 - now_t)
+        return web.json_response({"ok": False, "sent": False, "error":
+                                  "too many codes requested - try again in %d min, or click the link in the last email" % max(1, wait // 60)},
+                                 status=429)
     code = f"{secrets.randbelow(1000000):06d}"
-    c.execute("delete from email_codes where uid=?", (row["id"],))
-    c.execute("insert into email_codes(uid,code,exp,tries) values(?,?,?,0)", (row["id"], hash_key(code), int(time.time()) + 600))
+    c.execute("delete from email_codes where uid=?", (uid,))
+    c.execute("insert into email_codes(uid,code,exp,tries) values(?,?,?,0)", (uid, hash_key(code), now_t + 600))
     c.commit(); c.close()
-    ok = send_code(row["email"], code)
-    return web.json_response({"ok": True, "sent": ok, "to": row["email"],
-                              "msg": "code sent to your email" if ok else "email sending not configured yet — use the authenticator code"})
+    ok = send_code(mail, code)
+    _SENDS.setdefault(uid, []).append(now_t)
+    if request.remote in ("127.0.0.1", "::1"):
+        # the owner sitting on the box never depends on the mail provider
+        print("[chc] login code for %s: %s (15 min, local request)" % (mail, code), flush=True)
+    return web.json_response({"ok": True, "sent": ok, "to": mail, "local": request.remote in ("127.0.0.1", "::1"),
+                              "msg": "code sent to your email" if ok else "mail not accepted - the code is in the service log on this machine"})
 
 async def api_magic_request(request):
     """Request a one-click login link for an account.
@@ -5758,6 +5784,21 @@ if __name__ == "__main__":
         print(("FIRST_LOGIN OK %s %s" % (em, link)) if ok else
               ("FIRST_LOGIN FAIL %s (mail not accepted - use the password)" % em), flush=True)
         raise SystemExit(0 if ok else 3)
+    if CLI.login_code:
+        em = CLI.login_code.strip().lower()
+        c = db()
+        row = c.execute("select id,email from users where lower(email)=?", (em,)).fetchone()
+        if not row:
+            c.close(); print("no such account:", em); raise SystemExit(2)
+        code = "%06d" % secrets.randbelow(1000000)
+        c.execute("delete from email_codes where uid=?", (row["id"],))
+        c.execute("insert into email_codes(uid,code,exp,tries) values(?,?,?,0)",
+                  (row["id"], hash_key(code), int(time.time()) + 900))
+        c.commit(); c.close()
+        print("EMAIL=%s" % row["email"])
+        print("CODE=%s" % code)
+        print("15 minutes. Type it on /login. No email sent, nothing left the box.")
+        raise SystemExit(0)
     if CLI.set_password:
         c = db()
         em, pw = set_user_password(c, CLI.set_password, CLI.password)

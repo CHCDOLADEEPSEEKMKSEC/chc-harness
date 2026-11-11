@@ -2545,7 +2545,12 @@ async def h_file(request):
     return web.FileResponse(p, headers={"Content-Disposition": f'inline; filename="{row["name"]}"'})
 
 # ------------------------------------------------------------------------- handlers
-async def h_index(r): return web.Response(text=landing(), content_type="text/html")
+async def h_index(r):
+    """A self-hosted CHC HARNESS is a HARNESS, not a marketing site: the front door is the
+    email + 6-digit-code sign in. The house's own public site (CHC_SELF_HOST unset) keeps the landing copy."""
+    if os.environ.get("CHC_SELF_HOST") == "1" and not current_user(r):
+        raise web.HTTPFound(BASE + "/login")
+    return web.Response(text=landing(), content_type="text/html")
 async def h_signup_page(r): return web.Response(text=auth_page("signup"), content_type="text/html")
 async def h_magic(r):
     """One-time login link: /magic?t=<token>. Single use, 15 min TTL, no password typed anywhere."""

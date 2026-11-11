@@ -105,6 +105,7 @@ sudo tee "/etc/systemd/system/$UNIT_NAME.service" >/dev/null <<UNIT
 Description=CHC HARNESS (self-hosted AI harness)
 After=network-online.target
 [Service]
+Environment=CHC_SELF_HOST=1
 Type=simple
 User=$SERVICE_USER
 WorkingDirectory=$PREFIX

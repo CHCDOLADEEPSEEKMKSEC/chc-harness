@@ -134,7 +134,15 @@ VAULT_LINE="$(sudo env CHC_SEAL_ROOT="$PREFIX/vault" "$PREFIX/venv/bin/python" "
 say "vault:   $VAULT_LINE"
 # WHO OWNS THIS INSTALL — recorded so /enter signs in THEIR account, not "whoever is in the db".
 if [ -z "$OWNER_EMAIL" ]; then
-  if [ -t 0 ]; then read -r -p "[chc] owner email (who signs in with /enter): " OWNER_EMAIL || true; fi
+  # `curl ... | bash` leaves stdin as the script, so ask the TERMINAL instead of stdin
+  if [ -r /dev/tty ]; then
+    printf "[chc] owner email (who signs in with /enter): " > /dev/tty 2>/dev/null || true
+    read -r OWNER_EMAIL < /dev/tty 2>/dev/null || true
+  fi
+fi
+if [ -z "$OWNER_EMAIL" ]; then
+  OWNER_EMAIL="owner@$(hostname -s 2>/dev/null || echo localhost).local"
+  say "no owner email given - using $OWNER_EMAIL (change it: echo you@example.com | sudo tee $PREFIX/owner)"
 fi
 if [ -z "$OWNER_EMAIL" ]; then
   OWNER_EMAIL="$(sudo "$PREFIX/venv/bin/python" - "$PREFIX/chc.db" <<'PY2' 2>/dev/null || true
@@ -151,11 +159,17 @@ sudo chmod 644 "$PREFIX/owner"
 say "owner:   $OWNER_EMAIL   (recorded in $PREFIX/owner)"
 
 # login is EMAIL + generated PASSWORD on /signin — no magic links, no "anyone with the email" entry
+sudo "$PREFIX/venv/bin/python" "$PREFIX/app.py" --db "$PREFIX/chc.db" --make-user "$OWNER_EMAIL" >/dev/null 2>&1 || true
 PW_LINE="$(sudo "$PREFIX/venv/bin/python" "$PREFIX/app.py" --db "$PREFIX/chc.db" --set-password "$OWNER_EMAIL" 2>/dev/null | tr '\n' ' ')"
 OWNER_PW="$(printf '%s' "$PW_LINE" | sed -n 's/.*PASSWORD=\([^ ]*\).*/\1/p')"
 say "LINK:    http://$HOST:$PORT/enter          (permanent - this one link is the login, every time)"
 say "email:   $OWNER_EMAIL"
-if [ -n "$OWNER_PW" ]; then say "password: $OWNER_PW   (generated once - save it now; press GENERATE NEW PASSWORD on $HOST:$PORT/admin/usage to make another)"; fi
+if [ -n "$OWNER_PW" ]; then
+  say "password: $OWNER_PW   (generated once - save it now; press GENERATE NEW PASSWORD on $HOST:$PORT/admin/usage to make another)"
+  printf 'LINK=http://%s:%s/enter\nEMAIL=%s\nPASSWORD=%s\n' "$HOST" "$PORT" "$OWNER_EMAIL" "$OWNER_PW" | sudo tee "$PREFIX/.creds" >/dev/null
+  sudo chmod 600 "$PREFIX/.creds"
+  say "saved:   .creds next to the install (chmod 600)"
+fi
 OWNER_LOGIN="$(sudo "$PREFIX/venv/bin/python" "$PREFIX/app.py" --db "$PREFIX/chc.db" \
   --public-url "http://$HOST:$PORT" --make-user "$OWNER_EMAIL" 2>/dev/null | tail -1)"
 [ -n "$OWNER_LOGIN" ] && say "login:   $OWNER_LOGIN   (one-time, 15 min)"

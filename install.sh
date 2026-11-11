@@ -179,6 +179,7 @@ if [ -z "$BREVO_KEY" ] && [ -z "$SMTP_CRED" ]; then
       if sudo cp "$c" "$PREFIX/$b" 2>/dev/null; then
         sudo chmod 600 "$PREFIX/$b" 2>/dev/null || true
         say "mail:    reused the mail config already on this box ($c)"
+        REUSED=1
         if [ "$b" = "smtp.env" ]; then
           SMTP_CRED="$(sudo "$PREFIX/venv/bin/python" -c 'import json,sys;d=json.load(open(sys.argv[1]));print(d["email"]+":"+d["password"])' "$PREFIX/$b" 2>/dev/null)"
         fi
@@ -213,7 +214,9 @@ try:
 except Exception as e: print("MAIL FAIL "+type(e).__name__)
 PYM
 )"
-elif [ -r "$PREFIX/mailapi.env" ]; then
+elif [ "${REUSED:-0}" = "1" ] && [ -r "$PREFIX/mailapi.env" ]; then
+  MAIL_LINE="MAIL OK (existing config reused)"
+elif [ "${REUSED:-0}" = "1" ]; then
   MAIL_LINE="MAIL OK (existing config reused)"
 elif [ -n "$SMTP_CRED" ]; then
   U="${SMTP_CRED%%:*}"; P="${SMTP_CRED#*:}"

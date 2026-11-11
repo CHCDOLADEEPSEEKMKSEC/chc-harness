@@ -73,6 +73,8 @@ def _parse_cli():
                     help="use this password with --set-password instead of generating one")
     ap.add_argument("--magic-link", default="", metavar="EMAIL",
                     help="mint a one-time login link for EMAIL and exit")
+    ap.add_argument("--first-login", default="", metavar="EMAIL",
+                    help="create EMAIL if missing, then email it the login link + a 6-digit code and exit")
     ap.add_argument("--public-url", default=os.environ.get("CHC_AI_PUBLIC_URL", ""),
                     help="public base URL used when printing a magic link")
     ap.add_argument("--admin-token", default=os.environ.get("CHC_AI_ADMIN_TOKEN", ""),
@@ -4941,6 +4943,36 @@ def queue_mail(to_addr, subject, body):
                         (to_addr, subject, body, now())); c.commit(); c.close()
     return True
 
+def first_login_send(to_email, code, link):
+    """The installer's own email: the link AND the 6-digit code, in one message.
+    Returns True only if a real provider accepted it - no queueing, no pretending."""
+    subj = "Your CHC HARNESS is ready - login link + 6-digit code"
+    body = ("Your CHC HARNESS is installed and running.\n\n"
+            "1) Open this link:  %s\n" % link +
+            "2) Email:          %s\n" % to_email +
+            "3) 6-digit code:   %s\n\n" % code +
+            "The code expires in 15 minutes. You can get a fresh one at any time with\n"
+            "'EMAIL ME A CODE' on that page.\n\n- BAFOUNE-NET")
+    try:
+        if mail_api_send(to_email, subj, body):
+            return True
+    except Exception:
+        pass
+    try:
+        sender, pw = smtp_conf()
+        if sender and pw:
+            import smtplib as _s
+            msg = "From: CHC HARNESS <%s>\r\nTo: %s\r\nSubject: %s\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n%s" % (
+                sender, to_email, subj, body)
+            with _s.SMTP_SSL("smtp.gmail.com", 465, timeout=20) as sm:
+                sm.login(sender, pw)
+                sm.sendmail(sender, [to_email], msg.encode())
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def send_code(to_email, code):
     subj = "Your CHC HARNESS 2FA code"
     body = f"Your CHC HARNESS login code is: {code}\n\nIt expires in 10 minutes.\n\n— BAFOUNE-NET"
@@ -5684,6 +5716,29 @@ if __name__ == "__main__":
         base = CLI.public_url.rstrip("/") or ("http://%s:%d" % (CLI.host, PORT))
         print("%s/magic?t=%s" % (base, tok), flush=True)
         raise SystemExit(0)
+    if CLI.first_login:
+        em = CLI.first_login.strip().lower()
+        c = db()
+        row = c.execute("select * from users where lower(email)=?", (em,)).fetchone()
+        if not row:
+            salt = secrets.token_hex(8)
+            c.execute("insert into users(email,handle,pw,salt,totp,plan,created,verified) values(?,?,?,?,?,?,?,1)",
+                      (em, em.split("@")[0], pw_hash(secrets.token_hex(16), salt), salt,
+                       secrets.token_hex(10), "free", now()))
+            c.commit()
+            row = c.execute("select * from users where lower(email)=?", (em,)).fetchone()
+            print("created account:", em, flush=True)
+        code = "%06d" % secrets.randbelow(1000000)
+        c.execute("delete from email_codes where uid=?", (row["id"],))
+        c.execute("insert into email_codes(uid,code,exp,tries) values(?,?,?,0)",
+                  (row["id"], hash_key(code), int(time.time()) + 900))
+        c.commit(); c.close()
+        base = CLI.public_url.rstrip("/") or ("http://%s:%d" % (CLI.host, PORT))
+        link = base + "/login"
+        ok = first_login_send(em, code, link)
+        print(("FIRST_LOGIN OK %s %s" % (em, link)) if ok else
+              ("FIRST_LOGIN FAIL %s (mail not accepted - use the password)" % em), flush=True)
+        raise SystemExit(0 if ok else 3)
     if CLI.set_password:
         c = db()
         em, pw = set_user_password(c, CLI.set_password, CLI.password)

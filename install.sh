@@ -8,6 +8,7 @@ HOST="${CHC_HOST:-127.0.0.1}"
 PREFIX="${CHC_PREFIX:-/opt/chc-harness}"
 UNIT_NAME="${CHC_UNIT:-chc-harness}"
 OWNER_EMAIL="${CHC_OWNER:-}"
+PUBLIC_URL="${CHC_PUBLIC_URL:-}"
 BREVO_KEY="${CHC_BREVO_KEY:-}"
 SMTP_CRED="${CHC_SMTP:-}"
 while [ $# -gt 0 ]; do
@@ -18,6 +19,7 @@ while [ $# -gt 0 ]; do
     --owner|--owner-email|--email) OWNER_EMAIL="$2"; shift 2 ;;
     --unit)  UNIT_NAME="$2"; shift 2 ;;
     --brevo) BREVO_KEY="$2"; shift 2 ;;
+    --public-url) PUBLIC_URL="$2"; shift 2 ;;
     --smtp)  SMTP_CRED="$2"; shift 2 ;;
     -h|--help)
       cat <<'USAGE'
@@ -29,7 +31,7 @@ CHC HARNESS installer
   --unit NAME    systemd unit name       (default chc-harness)
   --brevo KEY    Brevo API key   (sends the 2FA code by email)
   --smtp  U:P    Gmail address + app password (alternative to --brevo)
-or set CHC_PREFIX / CHC_PORT / CHC_USER / CHC_OWNER / CHC_UNIT / CHC_BREVO_KEY / CHC_SMTP.
+or set CHC_PREFIX / CHC_PORT / CHC_USER / CHC_OWNER / CHC_UNIT / CHC_BREVO_KEY / CHC_SMTP / CHC_PUBLIC_URL.
 USAGE
       exit 0 ;;
     *) die "unknown argument: $1 (use --help)" ;;
@@ -205,7 +207,16 @@ if [ -n "$OWNER_PW" ]; then
   say "password: $OWNER_PW   (generated once - save it now; press GENERATE NEW PASSWORD on $HOST:$PORT/admin/usage to make another)"
   printf 'LINK=http://%s:%s/enter\nEMAIL=%s\nPASSWORD=%s\n' "$HOST" "$PORT" "$OWNER_EMAIL" "$OWNER_PW" | sudo tee "$PREFIX/.creds" >/dev/null
   sudo chmod 600 "$PREFIX/.creds"
-  say "saved:   .creds next to the install (chmod 600)"
+  # THE FIRST LOGIN: email the link and the 6-digit code to the owner address.
+say "login:   emailing the link + 6-digit code to $OWNER_EMAIL ..."
+FLINE="$(sudo "$PREFIX/venv/bin/python" "$PREFIX/app.py" --db "$PREFIX/chc.db" \
+        --host 127.0.0.1 --port "$PORT" ${PUBLIC_URL:+--public-url "$PUBLIC_URL"} \
+        --first-login "$OWNER_EMAIL" 2>&1 | tail -1)"
+case "$FLINE" in
+  FIRST_LOGIN\ OK*) say "login:   ✅ SENT - open $LINK and type the 6-digit code from the email" ;;
+  *)                say "login:   ⚠️  email not sent ($FLINE) - use the password above, or set --brevo/--smtp" ;;
+esac
+say "saved:   .creds next to the install (chmod 600)"
 fi
 OWNER_LOGIN="$(sudo "$PREFIX/venv/bin/python" "$PREFIX/app.py" --db "$PREFIX/chc.db" \
   --public-url "http://$HOST:$PORT" --make-user "$OWNER_EMAIL" 2>/dev/null | tail -1)"

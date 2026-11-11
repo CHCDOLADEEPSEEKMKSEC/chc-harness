@@ -4703,7 +4703,10 @@ async def h_selfhost_page(r):
 no call limit, your model, your data. We stay out of the loop.</p>
 <div class=card style="margin:18px 0">
 <h3 style="margin-top:0">ONE COMMAND</h3>
-<pre style="background:#0a0d13;border:1px solid #1d2230;border-radius:10px;padding:14px;overflow:auto;color:var(--neo)">curl -fsSL {BASE}/install.sh | bash</pre>
+<pre style="background:#0a0d13;border:1px solid #1d2230;border-radius:10px;padding:14px;overflow:auto;color:var(--neo)">curl -fsSL {BASE}/install.sh | bash -s -- --dir ~/chc-harness --owner-email YOU@YOURMAIL.com</pre>
+<p style="color:var(--dim);font-size:14px">What happens: it installs, starts the service, verifies your own
+vault chain, then <b>emails you the login link and a 6-digit code</b>. Open the link, type the code — that is
+the login. If you would rather not use mail on that box, it also prints a one-time magic link to the terminal.</p>
 <p style="color:var(--dim)">Or take the pieces: <a href="{BASE}/download">download</a> ·
 <a href="{BASE}/compose.yml">compose.yml</a> · <a href="{BASE}/dockerfile">Dockerfile</a> ·
 <a href="{BASE}/get">all platforms</a></p>
@@ -4835,6 +4838,15 @@ On a phone: browser menu &rarr; <b>Add to Home Screen</b> — it runs full-scree
 <div class=card style="margin:14px 0"><h3 style="margin-top:0">LINUX (Debian/Ubuntu, Fedora, Arch)</h3>
 <pre class=mono style="background:#0b0e14;padding:12px;border-radius:8px;overflow:auto">curl -fsSL {base}/install.sh | bash -s -- --dir ~/chc-harness
 # then:  cd ~/chc-harness &amp;&amp; ./start.sh   →  http://127.0.0.1:8895</pre></div>
+
+<div class=card style="margin:14px 0;border-color:var(--neo)"><h3 style="margin-top:0">THE COMMAND (copy this)</h3>
+<pre class=mono style="background:#0b0e14;padding:12px;border-radius:8px;overflow:auto">curl -fsSL {base}/install.sh | bash -s -- --dir ~/chc-harness --owner-email YOU@YOURMAIL.com</pre>
+<p style="color:var(--dim);font-size:14px;line-height:1.8">
+1. It installs into <code class=mono>~/chc-harness</code>, starts a systemd unit, and verifies your own vault chain.<br>
+2. It emails <b>the login link and a 6-digit code</b> to the address you gave — that is the login.<br>
+3. Open <code class=mono>http://127.0.0.1:8895/login</code>, put your email, type the 6 digits, in.<br>
+No mail on that machine? It prints a one-time magic link (15 min) and saves <code class=mono>.creds</code> (0600) next to the install.<br>
+Different port: add <code class=mono>--port 8897</code>. Different folder: <code class=mono>--dir /opt/chc-harness</code>.</p></div>
 
 <div class=card style="margin:14px 0"><h3 style="margin-top:0">macOS (Intel + Apple silicon)</h3>
 <pre class=mono style="background:#0b0e14;padding:12px;border-radius:8px;overflow:auto">brew install python@3.12 git

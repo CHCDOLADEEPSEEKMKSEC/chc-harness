@@ -5290,6 +5290,108 @@ async def api_memory_info(r):
                               "path": MASTER_MEMORY_PATH, "loaded": bool(mm)})
 
 
+
+# ---------------------------------------------------------------- MAESTRO
+# SPARKY -> CHC. A call channel: the junior agent posts a question, the senior
+# agent answers, the junior reads it back. Token auth, one shared file, no human
+# in the loop is required for a question to be *asked*.
+MAESTRO_TOK_FILE = pathlib.Path(os.environ.get("CHC_MAESTRO_TOKEN", "/opt/chc-ai/maestro.token"))
+MAESTRO_LOG = pathlib.Path(os.environ.get("CHC_MAESTRO_LOG", "/opt/chc-ai/maestro_calls.log"))
+
+
+def _maestro_tok():
+    try:
+        return MAESTRO_TOK_FILE.read_text().strip()
+    except Exception:
+        return ""
+
+
+def _maestro_ok(r):
+    want = _maestro_tok()
+    got = (r.headers.get("X-Maestro") or "")
+    return bool(want) and hmac.compare_digest(got, want)
+
+
+def _maestro_db():
+    c = db()
+    c.execute("""create table if not exists maestro(
+                   id integer primary key autoincrement, ts text, frm text,
+                   question text, answer text, ts_answered text)""")
+    c.commit()
+    return c
+
+
+async def api_maestro_call(r):
+    """POST {from, question} -> {id}. The question is queued for CHC."""
+    if not _maestro_ok(r):
+        return web.json_response({"error": "auth"}, status=401)
+    d = await r.json()
+    q = (d.get("question") or "").strip()
+    frm = (d.get("from") or "sparky").strip()[:32]
+    if not q:
+        return web.json_response({"error": "empty question"}, status=400)
+    c = _maestro_db()
+    cur = c.execute("insert into maestro(ts,frm,question,answer,ts_answered) values(?,?,?,?,?)",
+                    (now(), frm, q[:4000], None, None))
+    mid = cur.lastrowid
+    c.commit(); c.close()
+    try:
+        with open(MAESTRO_LOG, "a") as fh:
+            fh.write("%s\t[%s] %s\n" % (now(), frm, q[:2000]))
+    except Exception:
+        pass
+    return web.json_response({"ok": True, "id": mid})
+
+
+async def api_maestro_get(r):
+    """GET /api/maestro/call/<id> -> {id, question, answer|null, answered}"""
+    if not _maestro_ok(r):
+        return web.json_response({"error": "auth"}, status=401)
+    mid = int(r.match_info.get("id", "0") or 0)
+    c = _maestro_db()
+    row = c.execute("select id,ts,frm,question,answer,ts_answered from maestro where id=?", (mid,)).fetchone()
+    c.close()
+    if not row:
+        return web.json_response({"error": "not found"}, status=404)
+    return web.json_response({"ok": True, **dict(row), "answered": bool(row["answer"])})
+
+
+async def api_maestro_queue(r):
+    """GET /api/maestro/queue -> {open: n, calls: [...]}. What the heartbeat counts."""
+    if not _maestro_ok(r):
+        return web.json_response({"error": "auth"}, status=401)
+    c = _maestro_db()
+    rows = c.execute("select id,ts,frm,question from maestro where answer is null or answer='' "
+                     "order by id").fetchall()
+    c.close()
+    calls = [dict(x) for x in rows]
+    return web.json_response({"ok": True, "open": len(calls), "calls": calls})
+
+
+async def api_maestro_answer(r):
+    """POST {id, answer} -> {ok}. Answers a queued call."""
+    if not _maestro_ok(r):
+        return web.json_response({"error": "auth"}, status=401)
+    d = await r.json()
+    mid = int(d.get("id") or 0)
+    ans = (d.get("answer") or "").strip()
+    if not mid or not ans:
+        return web.json_response({"error": "id and answer required"}, status=400)
+    c = _maestro_db()
+    row = c.execute("select id from maestro where id=?", (mid,)).fetchone()
+    if not row:
+        c.close()
+        return web.json_response({"error": "not found"}, status=404)
+    c.execute("update maestro set answer=?, ts_answered=? where id=?", (ans[:8000], now(), mid))
+    c.commit(); c.close()
+    try:
+        with open(MAESTRO_LOG, "a") as fh:
+            fh.write("%s\t[chc] ANSWERED call #%d: %s\n" % (now(), mid, ans[:500]))
+    except Exception:
+        pass
+    return web.json_response({"ok": True, "id": mid})
+
+
 async def api_remember(r):
     u = current_user(r)
     if not u: return web.json_response({"error": "auth"}, status=401)
@@ -5706,6 +5808,10 @@ def build_app():
     app.router.add_post("/api/perms", api_perms)
     app.router.add_post("/api/shell", api_shell)
     app.router.add_get("/api/usage", api_usage)
+    app.router.add_post("/api/maestro/call", api_maestro_call)
+    app.router.add_get("/api/maestro/call/{id}", api_maestro_get)
+    app.router.add_get("/api/maestro/queue", api_maestro_queue)
+    app.router.add_post("/api/maestro/answer", api_maestro_answer)
     app.router.add_post("/api/remember", api_remember)
     app.router.add_get("/api/version", api_version)
     app.router.add_get("/api/memory-info", api_memory_info)

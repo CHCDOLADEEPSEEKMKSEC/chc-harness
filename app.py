@@ -2554,6 +2554,21 @@ async def h_index(r):
         raise web.HTTPFound(BASE + "/login")
     return web.Response(text=landing(), content_type="text/html")
 async def h_signup_page(r): return web.Response(text=auth_page("signup"), content_type="text/html")
+def _begin_2fa(uid, to_email, request):
+    """EVERY door ends at the code. Mint a 6-digit code, email it, land on /login.
+    A link (magic or enter token) is one factor; it NEVER mints a session on its own."""
+    if not to_email:
+        return web.HTTPFound(BASE + "/login")
+    code = "%06d" % secrets.randbelow(1000000)
+    c = db()
+    c.execute("delete from email_codes where uid=?", (uid,))
+    c.execute("insert into email_codes(uid,code,exp,tries) values(?,?,?,0)",
+              (uid, hash_key(code), int(time.time()) + 600))
+    c.commit(); c.close()
+    send_code(to_email, code)
+    return web.HTTPFound(BASE + "/login?email=" + urllib.parse.quote(to_email) + "&sent=1")
+
+
 async def h_magic(r):
     """One-time login link: /magic?t=<token>. Single use, 15 min TTL, no password typed anywhere."""
     t = r.query.get("t", "")
@@ -2576,11 +2591,11 @@ async def h_magic(r):
                                  "<h1>CHC HARNESS</h1><p>Private workspace link &mdash; open it in your browser to sign in.</p>"
                                  "</body>", content_type="text/html")
     c.execute("update magic set used = 1 where token = ?", (t,))
-    c.commit(); c.close()
-    resp = web.HTTPFound(BASE + "/app")
-    resp.set_cookie(COOKIE, sign("u:%d" % row["uid"]), httponly=True, samesite="Lax",
-                    max_age=60 * 60 * 24 * 30, path="/", secure=False)
-    return resp
+    c.commit()
+    acct = c.execute("select email from users where id=?", (row["uid"],)).fetchone()
+    c.close()
+    # 2FA ON EVERY DOOR: the link only proves the inbox. The 6-digit code still has to be typed.
+    return _begin_2fa(row["uid"], (acct["email"] if acct else ""), r)
 
 ENTER_LOGIN_PAGE = """<!doctype html><meta charset=utf-8><title>CHC HARNESS - sign in</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -2677,6 +2692,7 @@ LOGIN_PAGE = """<!doctype html><meta charset=utf-8><title>SIGN IN - CHC HARNESS<
   <p class="sub">Your email. A 6-digit code. That is the login.</p>
   <label for="em">email</label>
   <input id="em" type="email" autocomplete="username" placeholder="you@example.com" autofocus>
+  <div class="msg" id="pre" style="margin-top:8px;color:#39ff9e"></div>
   <label for="code">6-digit code</label>
   <input id="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="000000">
   <div class="row">
@@ -2687,9 +2703,12 @@ LOGIN_PAGE = """<!doctype html><meta charset=utf-8><title>SIGN IN - CHC HARNESS<
   <p class="foot">No account? <a href="/signup">Create one</a> &middot; <a href="/">Home</a></p>
 </div>
 <script>
+const qs=new URLSearchParams(location.search);
 const em=document.getElementById('em'), code=document.getElementById('code'),
       msg=document.getElementById('msg'), go=document.getElementById('go'), send=document.getElementById('send');
 function say(t,cls){msg.textContent=t;msg.className='msg '+(cls||'');}
+if(qs.get('email')){em.value=qs.get('email');}
+if(qs.get('sent')){say('6-digit code sent to '+(qs.get('email')||'your email')+' - type it below','ok');code.focus();}
 async function post(url,body){
   const r=await fetch(url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
   let j={}; try{j=await r.json();}catch(e){}
@@ -2758,10 +2777,10 @@ async def h_enter(r):
         if not row:
             c.close()
             return web.HTTPFound(BASE + "/enter")
+        acct = c.execute("select email from users where id=?", (row["id"],)).fetchone()
         c.close()
-        resp = web.HTTPFound(BASE + "/app")
-        set_session(resp, row["id"], "enter-link", r)
-        return resp
+        # 2FA ON EVERY DOOR: even the owner's permanent link must finish with the emailed code.
+        return _begin_2fa(row["id"], (acct["email"] if acct else ""), r)
     if tok:
         return web.json_response({"error": "bad token"}, status=403)
     return web.Response(text=ENTER_LOGIN_PAGE, content_type="text/html")

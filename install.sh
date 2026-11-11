@@ -168,28 +168,36 @@ sudo chmod 644 "$PREFIX/owner"
 say "owner:   $OWNER_EMAIL   (recorded in $PREFIX/owner)"
 
 # login is EMAIL + generated PASSWORD on /signin — no magic links, no "anyone with the email" entry
-# MAIL — 2FA needs a way to send the code. 1) reuse a mail config already on this box,
-# 2) honour --brevo/--smtp, 3) only then ask, and never accept something that is not a key.
+# MAIL — 2FA needs a way to send the code. Reuse a config already on this box, else
+# honour --brevo/--smtp, else ask. THIS BLOCK MUST NEVER ABORT THE INSTALL (set -e is on).
+set +e
 if [ -z "$BREVO_KEY" ] && [ -z "$SMTP_CRED" ]; then
   for c in "$HOME/chc-harness/mailapi.env" "$HOME/chc-harness/smtp.env" \
            /opt/chc-ai/mailapi.env /opt/chc-ai/smtp.env; do
     if [ -r "$c" ]; then
-      sudo cp "$c" "$PREFIX/$(basename "$c")" 2>/dev/null && sudo chmod 600 "$PREFIX/$(basename "$c")" 2>/dev/null && \
-        say "mail:    reused the mail config already on this box ($c)" && [ "$(basename "$c")" = "smtp.env" ] && SMTP_CRED="$(sudo "$PREFIX/venv/bin/python" -c 'import json,sys;d=json.load(open(sys.argv[1]));print(d["email"]+":"+d["password"])' "$c" 2>/dev/null)" && break
-      [ -r "$PREFIX/mailapi.env" ] && break
+      b="$(basename "$c")"
+      if sudo cp "$c" "$PREFIX/$b" 2>/dev/null; then
+        sudo chmod 600 "$PREFIX/$b" 2>/dev/null || true
+        say "mail:    reused the mail config already on this box ($c)"
+        if [ "$b" = "smtp.env" ]; then
+          SMTP_CRED="$(sudo "$PREFIX/venv/bin/python" -c 'import json,sys;d=json.load(open(sys.argv[1]));print(d["email"]+":"+d["password"])' "$PREFIX/$b" 2>/dev/null)"
+        fi
+        break
+      fi
     fi
   done
 fi
 if [ -z "$BREVO_KEY" ] && [ -z "$SMTP_CRED" ] && [ -r /dev/tty ]; then
-  printf "[chc] Brevo API key for the 2FA email (starts xkeysib-) — press ENTER to skip: " > /dev/tty 2>/dev/null || true
+  printf "[chc] Brevo API key for the 2FA email (starts xkeysib-) - press ENTER to skip: " > /dev/tty 2>/dev/null || true
   read -r BREVO_KEY < /dev/tty 2>/dev/null || true
 fi
 case "$BREVO_KEY" in
   "") : ;;
   xkeysib-*) : ;;
-  *) say "mail:    that is not a Brevo key (a key starts xkeysib-), ignoring it - put an email in --owner-email, not here"
+  *) say "mail:    that is not a Brevo key (a key starts xkeysib-) - ignoring it; the email goes in --owner-email"
      BREVO_KEY="" ;;
 esac
+MAIL_LINE="not set"
 if [ -n "$BREVO_KEY" ]; then
   printf '{"provider":"brevo","key":"%s","from":"CHC HARNESS <%s>"}\n' "$BREVO_KEY" "$OWNER_EMAIL" | sudo tee "$PREFIX/mailapi.env" >/dev/null
   sudo chmod 600 "$PREFIX/mailapi.env"
@@ -205,14 +213,17 @@ try:
 except Exception as e: print("MAIL FAIL "+type(e).__name__)
 PYM
 )"
+elif [ -r "$PREFIX/mailapi.env" ]; then
+  MAIL_LINE="MAIL OK (existing config reused)"
 elif [ -n "$SMTP_CRED" ]; then
   U="${SMTP_CRED%%:*}"; P="${SMTP_CRED#*:}"
   printf '{"email":"%s","password":"%s"}\n' "$U" "$P" | sudo tee "$PREFIX/smtp.env" >/dev/null
   sudo chmod 600 "$PREFIX/smtp.env"
   MAIL_LINE="MAIL OK (smtp saved)"
 else
-  MAIL_LINE="MAIL NOT SET - 2FA code cannot be emailed; the password alone will NOT log you in"
+  MAIL_LINE="NOT SET - the 6-digit code cannot be emailed; the password still works on this machine"
 fi
+set -e
 say "mail:    $MAIL_LINE"
 
 sudo "$PREFIX/venv/bin/python" "$PREFIX/app.py" --db "$PREFIX/chc.db" --make-user "$OWNER_EMAIL" >/dev/null 2>&1 || true

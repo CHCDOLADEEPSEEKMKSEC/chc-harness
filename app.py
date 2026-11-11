@@ -1166,6 +1166,8 @@ document.querySelector('#loginpw').onclick=async()=>{{
     body:JSON.stringify({{email:email,pw:pw}})}});
   const j=await r.json();
   if(!j.ok){{msg.textContent=j.error||'login failed';return;}}
+  // hard 2FA: the password only triggers the emailed code, so finish on /enter
+  if(j.need_code){{location='{BASE}/enter';return;}}
   location='{BASE}/app';
 }};
 """, css=FIRE_CSS, cls="landing")
@@ -2588,25 +2590,51 @@ ENTER_LOGIN_PAGE = """<!doctype html><meta charset=utf-8><title>CHC HARNESS - si
  a{color:#39ff9e;text-decoration:none}
 </style>
 <h1>CHC HARNESS</h1>
-<p class="sub">One link. Email + password. That is the whole login.</p>
+<p class="sub">One link. Email + password, then the 6-digit code we email to you.</p>
 <label>email</label><input id="em" autocomplete="username" autofocus>
 <label>password</label><input id="pw" type="password" autocomplete="current-password">
+<label id="lblcode" style="display:none">code from your email</label>
+<input id="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" style="display:none">
 <button id="go">SIGN IN</button>
 <div class="err" id="msg"></div>
 <p class="foot">No account on this box yet? <a href="/signup">CREATE ONE</a></p>
 <script>
 const go=document.getElementById('go'), msg=document.getElementById('msg');
+let stage=1, email='';
 async function doLogin(){
   msg.textContent='';
-  const email=document.getElementById('em').value.trim(), pw=document.getElementById('pw').value;
-  if(!email||!pw){msg.textContent='email and password required';return;}
+  if(stage===1){
+    email=document.getElementById('em').value.trim();
+    const pw=document.getElementById('pw').value;
+    if(!email||!pw){msg.textContent='email and password required';return;}
+    go.disabled=true;
+    try{
+      const r=await fetch('/api/login',{method:'POST',headers:{'content-type':'application/json'},
+        body:JSON.stringify({email,pw})});
+      const j=await r.json();
+      if(j.ok && !j.need_code){location='/app';return;}
+      if(j.ok && j.need_code){
+        stage=2;
+        for(const id of ['pw']) document.getElementById(id).style.display='none';
+        document.getElementById('lblcode').style.display='block';
+        const ci=document.getElementById('code'); ci.style.display='block'; ci.focus();
+        go.textContent='ENTER CODE';
+        msg.textContent='6-digit code sent to '+(j.to||'your email');
+        go.disabled=false; return;
+      }
+      msg.textContent=j.error||'login failed';
+    }catch(e){msg.textContent='network error';}
+    go.disabled=false; return;
+  }
+  const code=document.getElementById('code').value.trim();
+  if(!/^\d{6}$/.test(code)){msg.textContent='6 digits from the email';return;}
   go.disabled=true;
   try{
-    const r=await fetch('/api/login',{method:'POST',headers:{'content-type':'application/json'},
-      body:JSON.stringify({email,pw})});
+    const r=await fetch('/api/login_email',{method:'POST',headers:{'content-type':'application/json'},
+      body:JSON.stringify({acct:email,code})});
     const j=await r.json();
     if(j.ok){location='/app';return;}
-    msg.textContent=j.error||'login failed';
+    msg.textContent=j.error||'bad code';
   }catch(e){msg.textContent='network error';}
   go.disabled=false;
 }
@@ -3094,23 +3122,47 @@ async def api_signup(request):
         open("/opt/chc-ai/vault_provision.log", "a").write("signup vault spawn failed uid=%s: %r\n" % (uid, _e))
     return web.json_response({"ok": True, "totp": secret, "created": 1, "acct": email})
 
+def _mask_email(e):
+    try:
+        user, _, dom = e.partition("@")
+        return (user[:2] + "*" * max(1, len(user) - 2)) + "@" + dom
+    except Exception:
+        return e
+
+
 async def api_login(request):
+    """STEP 1 of a hard 2FA login: password only. This NEVER opens a session.
+
+    A correct password triggers a 6-digit code to the account's own inbox; the
+    session is only created by api_login_email() when that code comes back.
+    Email alone cannot get in, and password alone cannot get in.
+    """
     d = await request.json()
     ident = (d.get("email") or "").strip().lower()
-    pw, code = d.get("pw") or "", (d.get("code") or "").strip()
+    pw = d.get("pw") or ""
     c = db()
     row = c.execute("select * from users where email=? or lower(handle)=?", (ident, ident)).fetchone()
-    c.close()
-    if not row: return web.json_response({"error": "no such account"})
+    if not row:
+        c.close(); return web.json_response({"error": "no such account"})
     if not hmac.compare_digest(pw_hash(pw, row["salt"]), row["pw"]):
-        return web.json_response({"error": "wrong password"})
-    # 2FA is OPTIONAL (operator, 7 Nov): a correct password opens the session.
-    # If a code IS supplied it must be valid; no code is not an error.
-    if code and not totp_ok(row["totp"], code):
-        return web.json_response({"error": "bad 2FA code (or leave the code blank)"})
-    resp = web.json_response({"ok": True})
-    set_session(resp, row["id"], "password", request)
-    return resp
+        c.close(); return web.json_response({"error": "wrong password"})
+    code = f"{secrets.randbelow(1000000):06d}"
+    c.execute("delete from email_codes where uid=?", (row["id"],))
+    c.execute("insert into email_codes(uid,code,exp,tries) values(?,?,?,0)",
+              (row["id"], hash_key(code), int(time.time()) + 600))
+    c.commit()
+    c.close()
+    ok = send_code(row["email"], code)
+    if not ok:
+        # FAIL CLOSED: no code, no session - except for the owner sitting on the
+        # machine itself (loopback), so a box without mail set up is not bricked.
+        if request.remote in ("127.0.0.1", "::1"):
+            resp = web.json_response({"ok": True, "local": True})
+            set_session(resp, row["id"], "password-local", request)
+            return resp
+        return web.json_response({"error": "cannot send your 2FA code - this server has no mail configured"}, status=503)
+    return web.json_response({"ok": True, "need_code": True, "to": _mask_email(row["email"]),
+                              "msg": "code sent - check your email"})
 
 async def api_totp_confirm(request):
     d = await request.json()

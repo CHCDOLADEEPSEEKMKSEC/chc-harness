@@ -2643,6 +2643,87 @@ document.addEventListener('keydown',e=>{if(e.key==='Enter')doLogin();});
 </script>"""
 
 
+LOGIN_PAGE = """<!doctype html><meta charset=utf-8><title>SIGN IN - CHC HARNESS</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+ *{box-sizing:border-box}
+ body{background:#05060a;color:#e8edf7;font:16px/1.6 system-ui,-apple-system,Segoe UI,sans-serif;margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
+ .card{width:100%;max-width:420px;background:#0a0e15;border:1px solid #1b2230;border-radius:18px;padding:30px 26px}
+ h1{font:900 34px/1 system-ui;color:#39ff9e;letter-spacing:.04em;margin:0 0 6px;text-align:center}
+ .sub{color:#8892a6;font-size:14px;text-align:center;margin:0 0 24px}
+ label{display:block;color:#8892a6;font-size:11px;text-transform:uppercase;letter-spacing:.1em;margin:16px 0 6px}
+ input{width:100%;background:#070a10;border:1px solid #1d2331;border-radius:11px;color:#e8edf7;padding:14px;font:16px inherit;outline:none}
+ input:focus{border-color:#39ff9e}
+ input#code{font:700 26px/1 ui-monospace,monospace;letter-spacing:.42em;text-align:center;padding:14px 8px 14px 18px}
+ .row{display:flex;gap:10px;margin-top:20px}
+ button{flex:1;padding:15px 12px;border:0;border-radius:12px;cursor:pointer;font:800 15px system-ui}
+ #send{background:#141b26;color:#9fb3c8;border:1px solid #232c3b}
+ #go{background:linear-gradient(135deg,#39ff9e,#14c47a);color:#04110a}
+ #go:disabled{opacity:.5;cursor:wait}
+ .msg{margin-top:16px;font-size:13px;min-height:20px;color:#8892a6;text-align:center}
+ .ok{color:#39ff9e}.bad{color:#ff7b72}
+ .foot{margin-top:22px;font-size:12px;color:#5d6779;text-align:center}
+ a{color:#39ff9e}
+</style>
+<div class="card">
+  <h1>CHC HARNESS</h1>
+  <p class="sub">Your email. A 6-digit code. That is the login.</p>
+  <label for="em">email</label>
+  <input id="em" type="email" autocomplete="username" placeholder="you@example.com" autofocus>
+  <label for="code">6-digit code</label>
+  <input id="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="000000">
+  <div class="row">
+    <button id="send" type="button">EMAIL ME A CODE</button>
+    <button id="go" type="button">SIGN IN</button>
+  </div>
+  <div class="msg" id="msg"></div>
+  <p class="foot">No account? <a href="/signup">Create one</a> &middot; <a href="/">Home</a></p>
+</div>
+<script>
+const em=document.getElementById('em'), code=document.getElementById('code'),
+      msg=document.getElementById('msg'), go=document.getElementById('go'), send=document.getElementById('send');
+function say(t,cls){msg.textContent=t;msg.className='msg '+(cls||'');}
+async function post(url,body){
+  const r=await fetch(url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+  let j={}; try{j=await r.json();}catch(e){}
+  return j;
+}
+send.onclick=async()=>{
+  const e=em.value.trim();
+  if(!e){say('put your email first','bad');em.focus();return;}
+  send.disabled=true; say('sending...');
+  try{
+    const j=await post('/api/email_code',{acct:e});
+    if(j.ok && j.sent){say('code sent to '+e+' - check your inbox','ok');code.focus();}
+    else say(j.msg||j.error||'could not send the code','bad');
+  }catch(e){say('network error','bad');}
+  send.disabled=false;
+};
+go.onclick=async()=>{
+  const e=em.value.trim(), c=code.value.trim();
+  if(!e){say('put your email','bad');em.focus();return;}
+  if(!/^[0-9]{6}$/.test(c)){say('the 6 digits from the email','bad');code.focus();return;}
+  go.disabled=true; say('checking...');
+  try{
+    const j=await post('/api/login_email',{acct:e,code:c});
+    if(j.ok){say('in. opening the harness...','ok');location='/app';return;}
+    say(j.error||'bad code','bad');
+  }catch(e){say('network error','bad');}
+  go.disabled=false;
+};
+code.addEventListener('input',()=>{code.value=code.value.replace(/[^0-9]/g,'')});
+document.addEventListener('keydown',e=>{if(e.key==='Enter'){document.getElementById('code').value.trim()?go.click():send.click();}});
+</script>"""
+
+
+async def h_login(r):
+    if current_user(r):
+        raise web.HTTPFound(BASE + "/app")
+    resp = web.Response(text=LOGIN_PAGE, content_type="text/html")
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
 async def h_enter(r):
     """/enter — THE permanent link. Same URL for ever, no token needed.
 
@@ -5452,6 +5533,7 @@ def build_app():
     app.router.add_get("/signup", h_signup_page)
     app.router.add_get("/magic", h_magic)
     app.router.add_get("/enter", h_enter)
+    app.router.add_get("/login", h_login)
     app.router.add_get("/login", h_login_page)
     app.router.add_get("/signin", h_signin)
     app.router.add_get("/totp", h_totp_page)

@@ -213,7 +213,7 @@ FLINE="$(sudo "$PREFIX/venv/bin/python" "$PREFIX/app.py" --db "$PREFIX/chc.db" \
         --host 127.0.0.1 --port "$PORT" ${PUBLIC_URL:+--public-url "$PUBLIC_URL"} \
         --first-login "$OWNER_EMAIL" 2>&1 | tail -1)"
 case "$FLINE" in
-  FIRST_LOGIN\ OK*) say "login:   ✅ SENT - open $LINK and type the 6-digit code from the email" ;;
+  FIRST_LOGIN\ OK*) say "login:   ✅ SENT - open http://127.0.0.1:$PORT/login and type the 6-digit code from the email" ;;
   *)                say "login:   ⚠️  email not sent ($FLINE) - use the password above, or set --brevo/--smtp" ;;
 esac
 say "saved:   .creds next to the install (chmod 600)"

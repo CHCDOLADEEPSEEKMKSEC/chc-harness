@@ -201,7 +201,7 @@ say "mail:    $MAIL_LINE"
 sudo "$PREFIX/venv/bin/python" "$PREFIX/app.py" --db "$PREFIX/chc.db" --make-user "$OWNER_EMAIL" >/dev/null 2>&1 || true
 PW_LINE="$(sudo "$PREFIX/venv/bin/python" "$PREFIX/app.py" --db "$PREFIX/chc.db" --set-password "$OWNER_EMAIL" 2>/dev/null | tr '\n' ' ')"
 OWNER_PW="$(printf '%s' "$PW_LINE" | sed -n 's/.*PASSWORD=\([^ ]*\).*/\1/p')"
-say "LINK:    http://$HOST:$PORT/enter          (permanent - this one link is the login, every time)"
+say "LINK:    http://$HOST:$PORT/login           (permanent - this one link is the login, every time)"
 say "email:   $OWNER_EMAIL"
 if [ -n "$OWNER_PW" ]; then
   say "password: $OWNER_PW   (generated once - save it now; press GENERATE NEW PASSWORD on $HOST:$PORT/admin/usage to make another)"

@@ -4740,20 +4740,38 @@ async def h_assetlinks(r):
     return web.json_response(links)
 
 
+def _mail_candidates(name):
+    """mailapi.env / smtp.env live next to the install - find them wherever that is."""
+    out = []
+    env = os.environ.get("CHC_AI_MAIL_API_ENV" if name == "mailapi.env" else "CHC_AI_SMTP_ENV")
+    if env:
+        out.append(pathlib.Path(env))
+    for base in (getattr(DBP, "parent", None), pathlib.Path(str(CLI.db)).resolve().parent,
+                 pathlib.Path.cwd()):
+        if base is not None:
+            out.append(pathlib.Path(base) / name)
+    out.append(pathlib.Path("/opt/chc-ai") / name)
+    return out
+
+
+def _mail_json(name):
+    for pth in _mail_candidates(name):
+        try:
+            if pth.is_file():
+                return json.loads(pth.read_text())
+        except Exception:
+            continue
+    return {}
+
+
 def smtp_conf():
-    try:
-        d = json.loads(SMTP_ENV.read_text())
-        return d.get("email", ""), d.get("password", "")
-    except Exception:
-        return "", ""
+    d = _mail_json("smtp.env")
+    return d.get("email", ""), d.get("password", "")
 
 MAIL_API_ENV = pathlib.Path(os.environ.get("CHC_AI_MAIL_API_ENV") or (str(DBP.parent / "mailapi.env") if (DBP.parent / "mailapi.env").exists() else "/opt/chc-ai/mailapi.env"))
 
 def mail_api_conf():
-    try:
-        return json.loads(MAIL_API_ENV.read_text())
-    except Exception:
-        return {}
+    return _mail_json("mailapi.env")
 
 def mail_api_send(to_addr, subject, body):
     """HTTPS mail transport (Resend or Brevo). Works when SMTP ports are blocked."""

@@ -8,6 +8,8 @@ HOST="${CHC_HOST:-127.0.0.1}"
 PREFIX="${CHC_PREFIX:-/opt/chc-harness}"
 UNIT_NAME="${CHC_UNIT:-chc-harness}"
 OWNER_EMAIL="${CHC_OWNER:-}"
+BREVO_KEY="${CHC_BREVO_KEY:-}"
+SMTP_CRED="${CHC_SMTP:-}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --dir)   PREFIX="$2"; shift 2 ;;
@@ -15,6 +17,8 @@ while [ $# -gt 0 ]; do
     --user)  SERVICE_USER="$2"; shift 2 ;;
     --owner|--owner-email|--email) OWNER_EMAIL="$2"; shift 2 ;;
     --unit)  UNIT_NAME="$2"; shift 2 ;;
+    --brevo) BREVO_KEY="$2"; shift 2 ;;
+    --smtp)  SMTP_CRED="$2"; shift 2 ;;
     -h|--help)
       cat <<'USAGE'
 CHC HARNESS installer
@@ -23,7 +27,9 @@ CHC HARNESS installer
   --user NAME    service user            (default: you)
   --owner EMAIL  owner account email      (default: asked, or first account)
   --unit NAME    systemd unit name       (default chc-harness)
-or set CHC_PREFIX / CHC_PORT / CHC_USER / CHC_OWNER / CHC_UNIT.
+  --brevo KEY    Brevo API key   (sends the 2FA code by email)
+  --smtp  U:P    Gmail address + app password (alternative to --brevo)
+or set CHC_PREFIX / CHC_PORT / CHC_USER / CHC_OWNER / CHC_UNIT / CHC_BREVO_KEY / CHC_SMTP.
 USAGE
       exit 0 ;;
     *) die "unknown argument: $1 (use --help)" ;;
@@ -159,6 +165,36 @@ sudo chmod 644 "$PREFIX/owner"
 say "owner:   $OWNER_EMAIL   (recorded in $PREFIX/owner)"
 
 # login is EMAIL + generated PASSWORD on /signin — no magic links, no "anyone with the email" entry
+# MAIL — 2FA needs a way to send the code. Ask once, store it, test it.
+if [ -z "$BREVO_KEY" ] && [ -z "$SMTP_CRED" ] && [ -r /dev/tty ]; then
+  printf "[chc] Brevo API key for 2FA email (blank = skip, then 2FA only works on this machine): " > /dev/tty 2>/dev/null || true
+  read -r BREVO_KEY < /dev/tty 2>/dev/null || true
+fi
+if [ -n "$BREVO_KEY" ]; then
+  printf '{"provider":"brevo","key":"%s","from":"CHC HARNESS <%s>"}\n' "$BREVO_KEY" "$OWNER_EMAIL" | sudo tee "$PREFIX/mailapi.env" >/dev/null
+  sudo chmod 600 "$PREFIX/mailapi.env"
+  MAIL_LINE="$(sudo "$PREFIX/venv/bin/python" - "$PREFIX/mailapi.env" "$OWNER_EMAIL" <<'PYM' 2>&1 | tail -1
+import json,sys,urllib.request
+cfg=json.load(open(sys.argv[1])); to=sys.argv[2]
+try:
+    body=json.dumps({"sender":{"email":cfg["from"].split("<")[-1].rstrip(">"),"name":"CHC HARNESS"},
+                     "to":[{"email":to}],"subject":"CHC HARNESS test","textContent":"2FA mail test from your new install"}).encode()
+    req=urllib.request.Request("https://api.brevo.com/v3/smtp/email",data=body,
+        headers={"api-key":cfg["key"],"Content-Type":"application/json"})
+    with urllib.request.urlopen(req,timeout=25) as r: print("MAIL OK" if 200<=r.status<300 else "MAIL FAIL")
+except Exception as e: print("MAIL FAIL "+type(e).__name__)
+PYM
+)"
+elif [ -n "$SMTP_CRED" ]; then
+  U="${SMTP_CRED%%:*}"; P="${SMTP_CRED#*:}"
+  printf '{"email":"%s","password":"%s"}\n' "$U" "$P" | sudo tee "$PREFIX/smtp.env" >/dev/null
+  sudo chmod 600 "$PREFIX/smtp.env"
+  MAIL_LINE="MAIL OK (smtp saved)"
+else
+  MAIL_LINE="MAIL NOT SET - 2FA code cannot be emailed; the password alone will NOT log you in"
+fi
+say "mail:    $MAIL_LINE"
+
 sudo "$PREFIX/venv/bin/python" "$PREFIX/app.py" --db "$PREFIX/chc.db" --make-user "$OWNER_EMAIL" >/dev/null 2>&1 || true
 PW_LINE="$(sudo "$PREFIX/venv/bin/python" "$PREFIX/app.py" --db "$PREFIX/chc.db" --set-password "$OWNER_EMAIL" 2>/dev/null | tr '\n' ' ')"
 OWNER_PW="$(printf '%s' "$PW_LINE" | sed -n 's/.*PASSWORD=\([^ ]*\).*/\1/p')"

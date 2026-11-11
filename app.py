@@ -1030,7 +1030,7 @@ APPLET_CSS = """
 @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(57,255,158,.5)}70%{box-shadow:0 0 0 8px rgba(57,255,158,0)}100%{box-shadow:0 0 0 0 rgba(57,255,158,0)}}
 .msgs{flex:1;overflow:auto;padding:22px 16px 8px;scroll-behavior:auto}
 #panel-chat{position:relative}
-#jump{position:absolute;right:18px;bottom:104px;z-index:30;display:none;cursor:pointer;background:var(--neo);color:#04110a;font:800 12px/1 system-ui;padding:9px 13px;border-radius:999px;box-shadow:0 6px 18px rgba(0,0,0,.45);letter-spacing:.04em}
+#jump{position:absolute;right:14px;bottom:14px;z-index:30;display:none;cursor:pointer;background:var(--neo);color:#04110a;font:800 12px/1 system-ui;padding:9px 13px;border-radius:999px;box-shadow:0 6px 18px rgba(0,0,0,.45);letter-spacing:.04em}
 #jump:hover{filter:brightness(1.08)}
 .msg{max-width:820px;margin:0 auto 16px;display:flex;gap:12px}
 .who{width:28px;height:28px;border-radius:8px;flex:0 0 28px;display:grid;place-items:center;font:900 12px/1 system-ui}
@@ -1487,7 +1487,7 @@ function toolBlock(name,args,result){{
   const a=document.createElement('pre'); a.textContent=args; d.appendChild(a);
   const r=document.createElement('div'); r.className='toolhead'; r.textContent='RESULT'; d.appendChild(r);
   const o=document.createElement('pre'); o.textContent=result; d.appendChild(o);
-  msgs.appendChild(d); msgs.scrollTop=msgs.scrollHeight; return d;
+  msgs.appendChild(d); msgs.scrollTop=msgs.scrollHeight; if(typeof paintJump==='function') paintJump(); return d;
 }}
 function showLoading(msg){{const b=document.querySelector('#loadingbox');document.querySelector('#loadingtext').textContent=msg||'LOADING CHAT…';b.style.display='flex';}}
 function hideLoading(){{document.querySelector('#loadingbox').style.display='none';}}
@@ -1516,7 +1516,8 @@ async function restore(){{
 }}
 // ---- AUTO-SCROLL + INLINE CHAT SYNC ---------------------------------------------
 let autoscroll=true, lastSeen=0, syncTimer=null;
-function stick(){{ if(autoscroll) msgs.scrollTop=msgs.scrollHeight; paintJump(); }}
+function stick(){{ msgs.scrollTop=msgs.scrollHeight; paintJump(); }}
+setInterval(()=>{{ if(autoscroll && msgs.scrollHeight-msgs.scrollTop-msgs.clientHeight > 8) msgs.scrollTop=msgs.scrollHeight; }}, 1200);
 function paintJump(){{
   const j=document.getElementById('jump'); if(!j) return;
   const far = msgs.scrollHeight-msgs.scrollTop-msgs.clientHeight > 120;
@@ -1532,10 +1533,9 @@ function jumpLatest(){{
 function paintScroll(){{ const c=document.getElementById('autoscroll'); if(c) c.classList.toggle('on',autoscroll); }}
 function toggleScroll(){{ autoscroll=!autoscroll; paintScroll(); if(autoscroll) stick(); }}
 msgs.addEventListener('scroll',()=>{{
-  const atBottom = msgs.scrollHeight-msgs.scrollTop-msgs.clientHeight < 60;
-  if(!atBottom && autoscroll){{ autoscroll=false; paintScroll(); }}
-  if(atBottom && !autoscroll){{ autoscroll=true; paintScroll(); }}
+  // AUTO TO BOTTOM, always: looking back at old messages must never un-pin the chat.
   paintJump();
+  if(autoscroll){{ paintScroll(); }}
 }});
 paintScroll(); paintJump();
 async function syncOnce(){{

@@ -5055,7 +5055,7 @@ async def api_remember(r):
     return web.json_response({"ok": True, "remember_all": on})
 
 
-CHAIN_PAGE = """<!doctype html><meta charset=utf-8><title>Your chain - CHC HARNESS</title>
+PROOF_PAGE = """<!doctype html><meta charset=utf-8><title>Your chain - CHC HARNESS</title>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <style>
 body{background:#05060a;color:#e8edf7;font:15px/1.6 system-ui;max-width:640px;margin:6vh auto;padding:0 20px}
@@ -5097,11 +5097,11 @@ async function go(){
 </script>"""
 
 
-async def h_chain(r):
+async def h_proof(r):
     u = current_user(r)
     if not u:
         raise web.HTTPFound(BASE + "/enter")
-    resp = web.Response(text=CHAIN_PAGE, content_type="text/html")
+    resp = web.Response(text=PROOF_PAGE, content_type="text/html")
     resp.headers["Cache-Control"] = "no-store"
     return resp
 
@@ -5466,7 +5466,7 @@ def build_app():
     app.router.add_get("/api/version", api_version)
     app.router.add_get("/api/memory-info", api_memory_info)
     app.router.add_get("/api/verify", api_verify)
-    app.router.add_get("/chain", h_chain)
+    app.router.add_get("/proof", h_proof)
     app.router.add_get("/admin/usage", admin_usage)
     app.router.add_get("/admin/logins", h_admin_logins)
     app.router.add_post("/api/admin/genpass", api_admin_genpass)

@@ -1028,7 +1028,10 @@ APPLET_CSS = """
 #dot.s{background:var(--neo);animation:pulse 1s infinite}
 #dot.e{background:var(--red);box-shadow:0 0 12px 2px var(--red)}
 @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(57,255,158,.5)}70%{box-shadow:0 0 0 8px rgba(57,255,158,0)}100%{box-shadow:0 0 0 0 rgba(57,255,158,0)}}
-.msgs{flex:1;overflow:auto;padding:22px 16px 8px}
+.msgs{flex:1;overflow:auto;padding:22px 16px 8px;scroll-behavior:auto}
+#panel-chat{position:relative}
+#jump{position:absolute;right:18px;bottom:104px;z-index:30;display:none;cursor:pointer;background:var(--neo);color:#04110a;font:800 12px/1 system-ui;padding:9px 13px;border-radius:999px;box-shadow:0 6px 18px rgba(0,0,0,.45);letter-spacing:.04em}
+#jump:hover{filter:brightness(1.08)}
 .msg{max-width:820px;margin:0 auto 16px;display:flex;gap:12px}
 .who{width:28px;height:28px;border-radius:8px;flex:0 0 28px;display:grid;place-items:center;font:900 12px/1 system-ui}
 .who.u{background:#1b2230;color:#cfd8e8}
@@ -1304,6 +1307,7 @@ def app_page(user, switched=""):
   <pre id=verifyout class=mono style="display:none;margin:0;padding:10px 14px;border-bottom:1px solid var(--line);background:#05060a;color:#cfd6e4;white-space:pre-wrap;font-size:12px"></pre>
   <section class="panel on" id=panel-chat>
     <div class=msgs id=msgs></div>
+    <a id=jump title="Jump to the newest message" onclick="jumpLatest();return false">&#8595; LATEST</a>
     <div class=composer><div class=inner>
       <div id=attachrow class=row style="display:none;gap:6px;flex-wrap:wrap;margin-bottom:8px"></div>
       <textarea id=q placeholder="Message CHC HARNESS…  (Ctrl+Enter to send)"></textarea>
@@ -1512,15 +1516,28 @@ async function restore(){{
 }}
 // ---- AUTO-SCROLL + INLINE CHAT SYNC ---------------------------------------------
 let autoscroll=true, lastSeen=0, syncTimer=null;
-function stick(){{ if(autoscroll) msgs.scrollTop=msgs.scrollHeight; }}
+function stick(){{ if(autoscroll) msgs.scrollTop=msgs.scrollHeight; paintJump(); }}
+function paintJump(){{
+  const j=document.getElementById('jump'); if(!j) return;
+  const far = msgs.scrollHeight-msgs.scrollTop-msgs.clientHeight > 120;
+  j.style.display = far ? 'block' : 'none';
+}}
+function jumpLatest(){{
+  // INSTANT, no smooth-scroll: pin, then snap to the very bottom in one frame.
+  autoscroll=true; paintScroll();
+  msgs.style.scrollBehavior='auto';
+  msgs.scrollTop=msgs.scrollHeight;
+  requestAnimationFrame(()=>{{ msgs.scrollTop=msgs.scrollHeight; paintJump(); }});
+}}
 function paintScroll(){{ const c=document.getElementById('autoscroll'); if(c) c.classList.toggle('on',autoscroll); }}
 function toggleScroll(){{ autoscroll=!autoscroll; paintScroll(); if(autoscroll) stick(); }}
 msgs.addEventListener('scroll',()=>{{
   const atBottom = msgs.scrollHeight-msgs.scrollTop-msgs.clientHeight < 60;
   if(!atBottom && autoscroll){{ autoscroll=false; paintScroll(); }}
   if(atBottom && !autoscroll){{ autoscroll=true; paintScroll(); }}
+  paintJump();
 }});
-paintScroll();
+paintScroll(); paintJump();
 async function syncOnce(){{
   if(!chat) return;
   try{{

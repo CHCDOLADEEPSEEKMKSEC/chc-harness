@@ -5534,7 +5534,6 @@ def build_app():
     app.router.add_get("/magic", h_magic)
     app.router.add_get("/enter", h_enter)
     app.router.add_get("/login", h_login)
-    app.router.add_get("/login", h_login_page)
     app.router.add_get("/signin", h_signin)
     app.router.add_get("/totp", h_totp_page)
     app.router.add_get("/app", h_app)

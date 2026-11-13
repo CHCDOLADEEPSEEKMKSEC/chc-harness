@@ -144,9 +144,7 @@ _base, _ids = _probe_servers(_cands)
 if _base:
     LLM_URL = _base + "/v1/chat/completions"
     if str(LLM_MODEL) in ("local", "", "None"):
-        # free tier prefers the local 14B (qwen3:14b); fall back sensibly
-        LLM_MODEL = (next((i for i in _ids if "qwen3:14b" in i), None)
-                     or next((i for i in _ids if "14b" in i.lower()), None)
+        LLM_MODEL = (next((i for i in _ids if "qwen2.5:3b" in i), None)
                      or next((i for i in _ids if "qwen" in i.lower()), None) or _ids[0])
 else:
     print("[model] WARNING: no local model server answered on %s - chat will fail until one runs"

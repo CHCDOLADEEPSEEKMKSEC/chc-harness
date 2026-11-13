@@ -1481,6 +1481,17 @@ async function refreshChats(){{
     box.appendChild(el);
   }});
 }}
+function dedupeBubbles(){{
+  const seen={{}};
+  [...msgs.querySelectorAll('.msg')].forEach(w=>{{
+    const role=w.dataset&&w.dataset.role; if(!role) return;
+    const b=w.querySelector('.bub'); if(!b) return;
+    const t=(b.textContent||'').replace(/\s+/g,' ').trim(); if(!t) return;
+    const key=role+'|'+t;
+    if(seen[key]){{ w.remove(); return; }}
+    seen[key]=1;
+  }});
+}}
 function toolBlock(name,args,result){{
   const d=document.createElement('div'); d.className='toolblock';
   const h=document.createElement('div'); h.className='toolhead'; h.textContent='TOOL CALL · '+name; d.appendChild(h);
@@ -1501,6 +1512,7 @@ async function openChat(id){{
     (list.length>400?list.slice(list.length-400):list).forEach(m=>bubble(m.role,m.content));
     if(list.length>400){{const n=document.createElement('div');n.className='msg';n.innerHTML='<div class=bub style="color:#8b93a3">showing the last 400 messages — the rest are safe on the server</div>';msgs.insertBefore(n,msgs.firstChild);}}
     (jj.tools||[]).forEach(t=>toolBlock(t.name,t.args,t.result));
+    dedupeBubbles();
     lastSeen = list.length ? (list[list.length-1].id||0) : 0;
     startSync();
   }}catch(e){{bubble('assistant','could not load this chat: '+e);}}
@@ -1515,7 +1527,7 @@ async function restore(){{
   if(pick) await openChat(pick.id);
 }}
 // ---- AUTO-SCROLL + INLINE CHAT SYNC ---------------------------------------------
-let autoscroll=true, lastSeen=0, syncTimer=null;
+let autoscroll=true, lastSeen=0, syncTimer=null, syncPaused=false;
 function stick(){{ msgs.scrollTop=msgs.scrollHeight; paintJump(); }}
 setInterval(()=>{{ if(autoscroll && msgs.scrollHeight-msgs.scrollTop-msgs.clientHeight > 8) msgs.scrollTop=msgs.scrollHeight; }}, 1200);
 function paintJump(){{
@@ -1540,6 +1552,7 @@ msgs.addEventListener('scroll',()=>{{
 paintScroll(); paintJump();
 async function syncOnce(){{
   if(!chat) return;
+  if(syncPaused) return;
   try{{
     const r=await fetch(BASE+'/api/chats/'+chat+'/since?after='+lastSeen); if(!r.ok) return;
     const j=await r.json();
@@ -1555,6 +1568,7 @@ async function syncOnce(){{
         }}
       }}
     }}
+    dedupeBubbles();
     stick();
   }}catch(_){{}}
 }}
@@ -1573,6 +1587,7 @@ async function cursorToEnd(){{
 }}
 document.querySelector('#send').onclick=async()=>{{
   const text=q.value.trim(); if(!text)return;
+  syncPaused=true;
   if(!chat) await newChat();
   bubble('user',text+(attached.size?'\\n[attached: '+Array.from(attached).map(i=>(filesIndex[i]||{{name:'file '+i}}).name).join(', ')+']':'')); q.value='';
   const b=bubble('assistant',''); let buf='';
@@ -1588,13 +1603,17 @@ document.querySelector('#send').onclick=async()=>{{
       raw+=dec.decode(value,{{stream:true}});
       let i; while((i=raw.indexOf('\\n'))>=0){{const line=raw.slice(0,i); raw=raw.slice(i+1);
         if(!line.startsWith('data:'))continue; const d=line.slice(5).trim(); if(d==='[DONE]')continue;
-        try{{const j=JSON.parse(d); if(j.tool){{toolBlock(j.tool.name,j.tool.args,j.tool.result);}} if(j.note){{const n=document.createElement('div'); n.className='toolnote'; n.textContent=j.note; msgs.appendChild(n); msgs.scrollTop=msgs.scrollHeight;}} if(j.delta){{b.textContent+=j.delta; msgs.scrollTop=msgs.scrollHeight;}}
+        try{{const j=JSON.parse(d); if(j.tool_start){{ window.__liveTool=toolBlock(j.tool_start.name,j.tool_start.args,'… running'); }}
+          if(j.tool){{ const _lt=window.__liveTool; window.__liveTool=null;
+            if(_lt){{ const pre=_lt.querySelectorAll('pre'); if(pre&&pre[1]) pre[1].textContent=j.tool.result||'(no output)'; }}
+            else toolBlock(j.tool.name,j.tool.args,j.tool.result); }} if(j.note){{const n=document.createElement('div'); n.className='toolnote'; n.textContent=j.note; msgs.appendChild(n); msgs.scrollTop=msgs.scrollHeight;}} if(j.delta){{b.textContent+=j.delta; msgs.scrollTop=msgs.scrollHeight;}}
           if(j.error){{lit('e','error'); b.textContent+='\\n[error] '+j.error;}}}}catch(_){{}}
       }}
     }}
     lit('','done');
   }}catch(e){{ if(e.name!=='AbortError'){{lit('e','error'); b.textContent+='\\n[error] '+e.message;}} else lit('','stopped'); }}
-  finally{{document.querySelector('#stop').style.display='none'; attached.clear(); renderAttached(); refreshChats();}}
+  finally{{document.querySelector('#stop').style.display='none'; attached.clear(); renderAttached(); refreshChats();
+    await cursorToEnd(); syncPaused=false; dedupeBubbles();}}
 }};
 document.querySelector('#stop').onclick=()=>{{ if(abort) abort.abort(); }};
 q.addEventListener('keydown',e=>{{if(e.key==='Enter'&&e.ctrlKey)document.querySelector('#send').click();}});
@@ -2436,7 +2455,7 @@ def _llm_call(key, messages, tools=None):
     with urllib.request.urlopen(req, timeout=120) as r:
         return json.load(r)["choices"][0]["message"]
 
-def _agent_run(msgs, uid, perms, on_delta, on_tool, on_note, on_done, on_error, up_key=None):
+def _agent_run(msgs, uid, perms, on_delta, on_tool, on_note, on_done, on_error, up_key=None, on_tool_start=None):
     """Upstream model + real tools. Tools run unprivileged in the user's own workspace."""
     try:
         key = up_key or UPSTREAM_KEY_FILE.read_text().strip()
@@ -2478,6 +2497,7 @@ def _agent_run(msgs, uid, perms, on_delta, on_tool, on_note, on_done, on_error, 
                                  "not progress. Tell me what you actually need and I will do it differently.)")
                         on_done(); return
                     continue
+                on_tool_start and on_tool_start(fn, json.dumps(args, ensure_ascii=False))
                 out = _exec_tool(uid, fn, args, perms)
                 on_tool(fn, json.dumps(args, ensure_ascii=False), out)
                 msgs.append({"role": "tool", "tool_call_id": tc.get("id", ""), "content": out})
@@ -3598,12 +3618,14 @@ async def api_chat(r):
         except Exception:
             pass
         loop.call_soon_threadsafe(q.put_nowait, {"tool": {"name": name, "args": args_json, "result": result}})
+    def on_tool_start(name, args_json):
+        loop.call_soon_threadsafe(q.put_nowait, {"tool_start": {"name": name, "args": args_json}})
     def on_done(): loop.call_soon_threadsafe(q.put_nowait, None)
     def on_error(err): loop.call_soon_threadsafe(q.put_nowait, {"error": err}); loop.call_soon_threadsafe(q.put_nowait, None)
     # tell the browser which model is actually answering - no guessing, no silent fallback
     q.put_nowait({"note": "model: DEEPSEEK (upstream)" if upstream else "model: QWEN (local)"})
     if tools_on:
-        threading.Thread(target=lambda: _agent_run(msgs, u["id"], perms, on_delta, on_tool, on_note, on_done, on_error, up_key=_uk),
+        threading.Thread(target=lambda: _agent_run(msgs, u["id"], perms, on_delta, on_tool, on_note, on_done, on_error, up_key=_uk, on_tool_start=on_tool_start),
                          daemon=True).start()
     else:
         threading.Thread(target=lambda: _stream_turn(msgs, MAX_TOKENS, on_delta, on_done, on_error, upstream,

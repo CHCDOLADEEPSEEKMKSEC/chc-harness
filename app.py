@@ -13,7 +13,7 @@ Env:
   CHC_AI_UPSTREAM_KEY file with a paid upstream key (optional)
   CHC_AI_PAY_ENV     file with payment details to display on the plan page (optional)
 """
-import asyncio, base64, hashlib, hmac, json, os, pathlib, re, secrets, smtplib, sqlite3, struct, time
+import asyncio, base64, hashlib, hmac, html, json, os, pathlib, re, secrets, smtplib, sqlite3, struct, time
 import datetime, urllib.request, urllib.parse, threading, uuid, subprocess
 from aiohttp import web
 
@@ -144,9 +144,7 @@ _base, _ids = _probe_servers(_cands)
 if _base:
     LLM_URL = _base + "/v1/chat/completions"
     if str(LLM_MODEL) in ("local", "", "None"):
-        # free tier prefers the local 14B (qwen3:14b); fall back sensibly
-        LLM_MODEL = (next((i for i in _ids if "qwen3:14b" in i), None)
-                     or next((i for i in _ids if "14b" in i.lower()), None)
+        LLM_MODEL = (next((i for i in _ids if "qwen2.5:3b" in i), None)
                      or next((i for i in _ids if "qwen" in i.lower()), None) or _ids[0])
 else:
     print("[model] WARNING: no local model server answered on %s - chat will fail until one runs"
@@ -346,6 +344,7 @@ def _mem_append(uid, rec):
             return                          # engine unavailable: refuse to persist, do not leak
         with open(path, "ab") as f:
             f.write(line)
+        _hs_retain(uid, rec)
     except Exception:
         pass
 
@@ -408,6 +407,70 @@ def _recall(uid, query, k=8):
         return [f.get("fact","") for f in facts if f.get("fact")]
     except Exception:
         return []
+
+# ---- HINDSIGHT: semantic memory tier (runs on NINJA, reached over a reverse SSH tunnel) ----
+# The chain proves. The S33 turn files are the private record. Hindsight is the *findable* tier:
+# one bank per account, so a customer's semantic memory is still theirs and still separate.
+HINDSIGHT_URL = os.environ.get("CHC_AI_HINDSIGHT", "http://127.0.0.1:18888").rstrip("/")
+HINDSIGHT_ON = str(os.environ.get("CHC_AI_HINDSIGHT_OFF", "")).lower() not in ("1", "true", "yes")
+
+def _hs_bank(uid):
+    return "sparky-%s" % uid
+
+def _hs(path, body=None, timeout=20):
+    """best-effort call; a dead memory tier must never break a chat"""
+    try:
+        if body is None:
+            req = urllib.request.Request(HINDSIGHT_URL + path)
+        else:
+            req = urllib.request.Request(HINDSIGHT_URL + path,
+                                         data=json.dumps(body).encode(),
+                                         headers={"Content-Type": "application/json"},
+                                         method="POST")
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode())
+    except Exception:
+        return None
+
+def _hs_retain(uid, rec):
+    """ship one finished turn to the semantic tier, off the request path"""
+    if not HINDSIGHT_ON:
+        return
+    text = (rec.get("user") or "").strip()
+    ans = (rec.get("assistant") or "").strip()
+    if not (text or ans):
+        return
+    body = {"items": [{"content": ("USER: " + text + ("\nASSISTANT: " + ans if ans else ""))[:4000]}]}
+    def _work():
+        _hs("/v1/default/banks/%s/memories" % _hs_bank(uid), body, timeout=60)
+    try:
+        threading.Thread(target=_work, daemon=True).start()
+    except Exception:
+        pass
+
+def _hs_recall(uid, query, k=5, timeout=8):
+    """meaning-based recall - the local _recall is word-match only"""
+    if not HINDSIGHT_ON:
+        return []
+    d = _hs("/v1/default/banks/%s/memories/recall" % _hs_bank(uid),
+            {"query": (query or "")[:500]}, timeout=timeout)
+    if not d:
+        return []
+    out = []
+    for it in (d.get("results") or [])[:k]:
+        t = (it.get("text") or it.get("content") or "").strip()
+        if t:
+            out.append(t[:400])
+    return out
+
+def hs_health(bank="chc-house"):
+    st = _hs("/v1/default/banks/%s/stats" % bank)
+    return {"url": HINDSIGHT_URL, "on": HINDSIGHT_ON, "reachable": st is not None,
+            "bank": bank, "stats": st}
+
+async def h_hindsight_health(request):
+    return web.json_response(hs_health())
+
 
 def _report(uid, model, ok=True, note=""):
     """daily field report - what SPARKY did, so the house can read progress"""
@@ -507,6 +570,40 @@ def plan_of(u):
     if t == "shell": return "qwen6"
     return "free"
 
+
+try:
+    import imggen
+except Exception as _imggen_err:  # image capability is optional, never breaks the app
+    imggen = None
+    print("[imggen] unavailable:", _imggen_err, flush=True)
+
+# ── SENSES (MIRAGE) — the house bridge that lets SPARKY actually LOOK at a link ──
+# The bridge runs on the desktop (tools/senses_bridge.py, 127.0.0.1:8907) and is reverse
+# tunnelled to this box's loopback. It reads the bytes, decodes image headers, runs OCR.
+SENSES_URL = "http://127.0.0.1:8907"
+
+def senses_see(url, timeout=30):
+    """Ask the house senses what they see at `url`. Never raises out of this contract."""
+    try:
+        req = urllib.request.Request(SENSES_URL + "/see?url=" + urllib.parse.quote(url, safe=""),
+                                     headers={"User-Agent": "CHC-HARNESS/senses"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode("utf-8", "replace"))
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"[:300], "url": url}
+
+def _senses_brief(s):
+    """One tight text block the model can reason from, built only from what was seen."""
+    if not s.get("ok"):
+        return None
+    head = "[SENSES REPORT - what the house actually saw at %s]\n%s" % (s.get("url"), s.get("vision") or "")
+    body = ""
+    if s.get("ocr"):
+        body = "\nTEXT READ OFF THE PICTURE (OCR, verbatim):\n" + s["ocr"][:3000]
+    elif s.get("text"):
+        body = "\nREADABLE PAGE TEXT:\n" + s["text"][:3000]
+    return head + body + "\n[END SENSES]\nAnswer from this report only. Never invent detail it does not contain."
+
 COOKIE = "chc_sess"
 BASE = CLI.base
 
@@ -554,6 +651,18 @@ def db():
     c.execute("""create table if not exists mail_queue(id integer primary key autoincrement, to_addr text,
                  subject text, body text, created text, sent integer default 0)""")
     c.execute("""create table if not exists claims(uid integer, token text, exp integer, used integer default 0)""")
+    c.execute("""create table if not exists mail_sends(id integer primary key autoincrement, uid integer, ts integer)""")
+    c.execute("""create index if not exists mail_sends_uid_ts on mail_sends(uid, ts)""")
+    # feedback board: the table predates this page (uid,email,kind,body,page,created,status);
+    # we extend it with a rating instead of fighting an existing production table.
+    c.execute("""create table if not exists feedback(
+        id integer primary key autoincrement, uid integer, email text, kind text default 'comment',
+        body text, page text, created text, status text default 'new', rating integer, ip text)""")
+    _cols = [r[1] for r in c.execute("pragma table_info(feedback)").fetchall()]
+    if "rating" not in _cols:
+        c.execute("alter table feedback add column rating integer")
+    if "ip" not in _cols:
+        c.execute("alter table feedback add column ip text")
     c.execute("""create table if not exists codes(code text primary key, plan text, days integer,
                  used integer default 0, uid integer default 0, created text)""")
     c.execute("""create table if not exists invoices(
@@ -876,10 +985,9 @@ def _stream_turn(messages, max_tokens, on_delta, on_done, on_error, upstream=Fal
 
 SITE = "https://ai.94-237-56-140.sslip.io"
 SITE_FOOT = """
-<footer style="margin-top:60px;border-top:1px solid #1d2230;padding:26px 20px 40px">
 <div class="wrap" style="display:flex;flex-wrap:wrap;gap:10px 22px;font-size:13px;color:#8892a6">
-<a href="/">HOME</a><a href="/free">FREE</a><a href="/self-host">SELF-HOST</a>
-<a href="/compare">COMPARE</a><a href="/security">SECURITY</a><a href="/blog">NOTES</a><a href="/plan">PLANS</a>
+<a href="/">HOME</a><a href="/free">FREE</a><a href="/try">TRY IT</a><a href="/self-host">SELF-HOST</a>
+<a href="/compare">COMPARE</a><a href="/feedback">FEEDBACK</a><a href="/security">SECURITY</a><a href="/blog">NOTES</a><a href="/plan">PLANS</a>
 <a href="/get">DOWNLOAD</a><a href="/signup">SIGN UP</a><a href="/assist">ASSIST</a>
 <a href="/sitemap.xml">SITEMAP</a>
 <div style="flex-basis:100%;color:#5d6779;font-size:11px;margin-top:6px">
@@ -887,6 +995,16 @@ CHC HARNESS — your own AI workspace. Free tier: 60 calls a day, no card.</div>
 </div></footer>"""
 
 
+STUDIO_BANNER = """
+<div style="background:#0a0d13;border-bottom:1px solid #1d2230;font-size:13px;color:#8892a6">
+ <div style="max-width:1080px;margin:0 auto;padding:9px 20px;display:flex;flex-wrap:wrap;gap:8px 18px;align-items:center">
+  <b style="color:#39ff9e;letter-spacing:.06em;font-size:11px">HOUSE STUDIO</b>
+  <a style="color:#e8edf7" href="https://atelier.94-237-56-140.sslip.io/">The Atelier</a>
+  <span style="color:#3a4254">&middot;</span>
+  <a style="color:#e8edf7" href="https://lumen.94-237-56-140.sslip.io/">Make an image or a 30s video &mdash; one free, no card</a>
+ </div>
+</div>
+"""
 SITE_DESC = ("Your own AI workspace: 60 free calls a day, no card. Chat, code, files and tools in a "
              "1 GB private space. Run it hosted, or self-host on your own machine with full access.")
 
@@ -1079,6 +1197,7 @@ def landing():
   Chat, code, write, automate, with a private 1 GB workspace that is yours alone. <b>$5 a month, one price, nothing to install.</b></p>
   <div class=row>
     <a class="btn" href="{BASE}/signup">CREATE ACCOUNT</a>
+<a class="btn ghost" href="{BASE}/try" style="border-color:var(--neo);color:var(--neo)">TALK TO DADDY — NO SIGNUP</a>
     <a class="btn ghost" href="{BASE}/login">LOG IN</a>
     <a class="btn ghost" href="{BASE}/download">SPEC &amp; DESIGN</a>
   </div>
@@ -1119,6 +1238,7 @@ def auth_page(mode):
     <div id=step2 style="display:none;margin-top:14px">
       <div class=field><label>6-DIGIT CODE</label><input id=code inputmode=numeric autocomplete=one-time-code placeholder="123456"></div>
       <div class=row><button class=btn id=go style="width:100%">VERIFY &amp; ENTER</button></div>
+      <div class=row style="margin-top:8px"><button class="btn ghost" id=resend style="width:100%">REQUEST A NEW CODE</button></div>
     </div>
     <div id=pwbox style="margin-top:14px">
       <div class=field><label>PASSWORD — no code needed if you set one</label><input id=pw type=password autocomplete=current-password placeholder="your password"></div>
@@ -1156,15 +1276,44 @@ document.querySelector('#send').onclick=async()=>{{
   sentTo=email;
   if(mode==='signup'){{document.querySelector('#hint').textContent='If an account already exists we email a login code instead.';}}
   document.querySelector('#step2').style.display='block';
-  msg.textContent=j.sent?('code sent to '+email+' — check your inbox'):(j.msg||'code queued — delivery not configured yet');
+  if(mode==='signup'){{
+    const sent = j.sent ? 'The 6-digit code is in your inbox.' : 'Your code is queued — if no email arrives in a minute, press REQUEST A NEW CODE.';
+    msg.className='';
+    msg.innerHTML=''
+      +'<div style="border:1px solid rgba(57,255,158,.55);border-radius:14px;padding:15px 16px;'
+      +'background:linear-gradient(180deg,rgba(57,255,158,.10),rgba(57,255,158,.015));text-align:left">'
+      +'<div style="font:600 12px/1 ui-monospace,monospace;letter-spacing:.18em;color:var(--neo)">VAULT PROVISIONED</div>'
+      +'<div style="color:#dfe7f3;font-size:13.5px;line-height:1.65;margin-top:9px">'
+      +'A private, signed receipt chain is being minted for <b style="color:#fff">'+email+'</b>.<br>'
+      +'Your key. Your record. No copy kept by us.</div>'
+      +'<div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:12px;font-size:11.5px;color:#8892a6;letter-spacing:.04em">'
+      +'<span>1 &middot; code in inbox</span><span>2 &middot; enter it below</span><span>3 &middot; workspace opens</span></div>'
+      +'<div style="color:#5d6779;font-size:11.5px;margin-top:10px">'+sent+'</div></div>';
+  }} else {{
+    msg.textContent=j.sent?('code sent to '+email+' — check your inbox'):(j.msg||'code queued — delivery not configured yet');
+  }}
 }};
 document.querySelector('#go').onclick=async()=>{{
   const r=await fetch('{BASE}/api/verify_code',{{method:'POST',headers:{{'content-type':'application/json'}},
     body:JSON.stringify({{email:sentTo||document.querySelector('#email').value.trim(),
                           code:document.querySelector('#code').value.trim()}})}});
   const j=await r.json();
-  if(!j.ok){{msg.textContent=j.error||'bad code';return;}}
+  if(!j.ok){{
+    msg.textContent=j.error||'bad code';
+    // if the code is dead or the tries are used up, say plainly how to get out of it
+    if(/tries|expired|no code/i.test(msg.textContent)){{
+      msg.textContent += ' — press REQUEST A NEW CODE below';
+    }}
+    return;
+  }}
   location='{BASE}/app';
+}};
+document.querySelector('#resend').onclick=async()=>{{
+  msg.textContent='sending a fresh code…';
+  const r=await fetch('{BASE}/api/email_code',{{method:'POST',headers:{{'content-type':'application/json'}},
+    body:JSON.stringify({{acct:sentTo||document.querySelector('#email').value.trim(),reset:true}})}});
+  const j=await r.json();
+  msg.textContent=j.ok?'fresh code sent — check the inbox (the old one is dead)':(j.error||'could not send');
 }};
 document.addEventListener('keydown',e=>{{if(e.key==='Enter')document.querySelector('#go').click();}});
 document.querySelector('#loginpw').onclick=async()=>{{
@@ -1218,10 +1367,12 @@ document.querySelector('#code').addEventListener('keydown',e=>{{if(e.key==='Ente
 """)
 
 def app_page(user, switched=""):
-    _m = "DEEPSEEK (UPSTREAM)" if user["upstream_on"] else "QWEN 3-4B (LOCAL)"
+    # label the model that is actually loaded - never a hardcoded guess
+    _short = (str(LLM_MODEL or "local").split("/")[-1].replace(":", " ").strip().upper()) or "LOCAL"
+    _m = "DEEPSEEK (UPSTREAM)" if user["upstream_on"] else ("%s (LOCAL)" % _short)
     _plan = (user["plan"] if "plan" in user.keys() else "free") or "free"
     _price = {"free": "FREE $0", "qwen6": "QWEN+ $5/MO", "deepseek3": "DEEPSEEK $5 TOP-UP", "big": "BIG (HOUSE)"}.get(_plan, _plan.upper())
-    model_line = "MODEL: %s · %s · 1 GB WORKSPACE" % (_m, _price)
+    model_line = "MODEL: %s · v%s · %s · 1 GB WORKSPACE" % (_m, VERSION, _price)
     banner = ""
     if switched in ("deepseek", "local"):
         _t = ("SWITCHED — now answering on DEEPSEEK (upstream)" if switched == "deepseek"
@@ -1267,6 +1418,7 @@ def app_page(user, switched=""):
     <a class="chip{' on' if user['upstream_on'] else ''}" id="modelswitch_deepseek" href="{BASE}/upstream/on" title="Run on DeepSeek (upstream)">DEEPSEEK</a>
     <span class=chip on data-mode=coding>CODER</span>
     <span class=chip data-mode=reasoning>REASONING</span>
+    <span class=chip data-mode=dev>DEV</span>
     <span class=chip data-mode=chat>CHAT</span>
     <span class=grow></span>
     <span class=chip perm on data-perm=read-write>READ-WRITE</span>
@@ -1309,12 +1461,15 @@ def app_page(user, switched=""):
   <pre id=verifyout class=mono style="display:none;margin:0;padding:10px 14px;border-bottom:1px solid var(--line);background:#05060a;color:#cfd6e4;white-space:pre-wrap;font-size:12px"></pre>
   <section class="panel on" id=panel-chat>
     <div class=msgs id=msgs></div>
+    {_gallery_html()}
     <a id=jump title="Jump to the newest message" onclick="jumpLatest();return false">&#8595; LATEST</a>
     <div class=composer><div class=inner>
       <div id=attachrow class=row style="display:none;gap:6px;flex-wrap:wrap;margin-bottom:8px"></div>
       <textarea id=q placeholder="Message CHC HARNESS…  (Ctrl+Enter to send)"></textarea>
-      <div class=sendrow><button class=btn id=send>STREAM</button><span style="color:#5d6779;font-size:12px" id=hint>coder mode · read-write</span><span class=grow></span><button class="chip" id=stop style="display:none">STOP</button></div>
+      <div class=sendrow><button class=btn id=send>STREAM</button><button class="chip" id=gimg title="Make an image on our hired GPU (delete-after-use)">🎨 IMAGE</button><button class="chip" id=gvid title="Make a short video on our hired GPU (takes minutes)">🎬 VIDEO</button><span id=genbar style="display:none;flex:1 1 120px;height:8px;background:#101a16;border-radius:6px;overflow:hidden"><span id=genfill style="display:block;height:100%;width:0%;background:var(--neo)"></span></span><span id=genstage style="display:none;color:#5d6779;font-size:11px"></span><button class="chip" id=genimg title="Generate an image with FLUX (free)">🎨 IMAGE</button><button class="chip" id=seeyes title="SPARKY actually looks at a link with the house senses (OCR + page text)">👁 SEE</button><span style="color:#5d6779;font-size:12px" id=hint>coder mode · read-write</span><span class=grow></span><button class="chip" id=stop style="display:none">STOP</button></div>
     </div></div>
+    <script defer src="{BASE}/js/imgcap.js"></script>
+    <script defer src="{BASE}/js/see.js"></script>
   </section>
   <section class=panel id=panel-files><div class=wrap2>
     <h3>FILES &amp; WORKSPACE</h3>
@@ -1366,7 +1521,7 @@ def app_page(user, switched=""):
   <div class=row style="margin-top:16px"><a class=btn href="{BASE}/plan">PLANS &amp; PRICING</a><a class="btn ghost" href="{BASE}/get">INSTALL</a><a class="btn ghost" href="{BASE}/logout">LOG OUT</a></div>
 </div></div>""", script=f"""
 const BASE={json.dumps(BASE)};
-let mode='coding', perm='read-write', chat=null, key='', abort=null;
+let mode='coding', perm='read-write', chat=null, key='', abort=null, streaming=false;
 const dot=document.querySelector('#dot'), msgs=document.querySelector('#msgs'), q=document.querySelector('#q');
 const hint=document.querySelector('#hint');
 function lit(s,t){{dot.className=s; dot.title=t||'';}}
@@ -1483,17 +1638,6 @@ async function refreshChats(){{
     box.appendChild(el);
   }});
 }}
-function dedupeBubbles(){{
-  const seen={{}};
-  [...msgs.querySelectorAll('.msg')].forEach(w=>{{
-    const role=w.dataset&&w.dataset.role; if(!role) return;
-    const b=w.querySelector('.bub'); if(!b) return;
-    const t=(b.textContent||'').replace(/\s+/g,' ').trim(); if(!t) return;
-    const key=role+'|'+t;
-    if(seen[key]){{ w.remove(); return; }}
-    seen[key]=1;
-  }});
-}}
 function toolBlock(name,args,result){{
   const d=document.createElement('div'); d.className='toolblock';
   const h=document.createElement('div'); h.className='toolhead'; h.textContent='TOOL CALL · '+name; d.appendChild(h);
@@ -1514,7 +1658,6 @@ async function openChat(id){{
     (list.length>400?list.slice(list.length-400):list).forEach(m=>bubble(m.role,m.content));
     if(list.length>400){{const n=document.createElement('div');n.className='msg';n.innerHTML='<div class=bub style="color:#8b93a3">showing the last 400 messages — the rest are safe on the server</div>';msgs.insertBefore(n,msgs.firstChild);}}
     (jj.tools||[]).forEach(t=>toolBlock(t.name,t.args,t.result));
-    dedupeBubbles();
     lastSeen = list.length ? (list[list.length-1].id||0) : 0;
     startSync();
   }}catch(e){{bubble('assistant','could not load this chat: '+e);}}
@@ -1529,7 +1672,7 @@ async function restore(){{
   if(pick) await openChat(pick.id);
 }}
 // ---- AUTO-SCROLL + INLINE CHAT SYNC ---------------------------------------------
-let autoscroll=true, lastSeen=0, syncTimer=null, syncPaused=false;
+let autoscroll=true, lastSeen=0, syncTimer=null, pendingUser='';
 function stick(){{ msgs.scrollTop=msgs.scrollHeight; paintJump(); }}
 setInterval(()=>{{ if(autoscroll && msgs.scrollHeight-msgs.scrollTop-msgs.clientHeight > 8) msgs.scrollTop=msgs.scrollHeight; }}, 1200);
 function paintJump(){{
@@ -1554,7 +1697,9 @@ msgs.addEventListener('scroll',()=>{{
 paintScroll(); paintJump();
 async function syncOnce(){{
   if(!chat) return;
-  if(syncPaused) return;
+  /* CHC 16 Nov DOUBLE-CHAT FIX #2: while a reply is streaming the stored row does not exist
+     yet, so the poller must not paint anything mid-stream - it re-reads after the stream ends. */
+  if(streaming) return;
   try{{
     const r=await fetch(BASE+'/api/chats/'+chat+'/since?after='+lastSeen); if(!r.ok) return;
     const j=await r.json();
@@ -1565,20 +1710,73 @@ async function syncOnce(){{
         // skip a duplicate of the bubble we are currently streaming into
         const last=msgs.lastElementChild;
         if(last && last.dataset && last.dataset.sid===String(m.id)) continue;
+        // CHC 2026-11-12 DOUBLE-CHAT FIX: what the composer already drew must not be painted twice.
+        if(m.role==='user' && pendingUser && (m.content||'').trim()===pendingUser.trim()){{ pendingUser=''; continue; }}
+        if(m.role==='user'){{
+          const want=(m.content||'').trim();
+          let dup=false;
+          for(const el of msgs.children){{ const b=el.querySelector('.bub')||el;
+            if((b.textContent||'').trim().startsWith(want)){{ dup=true; break; }} }}
+          if(dup) continue;
+        }}
+        // CHC 2026-11-11 DUPLICATE-REPLY FIX: while a reply streams it is already on screen; when the
+        // poller then sees its stored row it must NOT render it a second time. Same role + same text
+        // as the newest bubble = the same message.
+        /* CHC 16 Nov FIX #3 - THE ACTUAL CAUSE. The guard above only looked at the LAST element,
+           but the "model: ..." note is appended as a sibling AFTER the answer bubble, so `last` was
+           the note and the comparison never matched -> the stored row got painted a second time.
+           Now scan EVERY bubble in the thread: if that exact text is already on screen, it is the
+           same message and must not be drawn again. */
+        {{
+          const want=(m.content||'').trim();
+          let seen=false;
+          for(const el of msgs.children){{
+            const bub=el.querySelector ? el.querySelector('.bub') : null;
+            if(bub && (bub.textContent||'').trim()===want){{ seen=true; break; }}
+            if(!bub && (el.textContent||'').trim()===want){{ seen=true; break; }}
+          }}
+          if(seen) continue;
+        }}
         const b=bubble(m.role,m.content); if(b){{
           const wrap=b.closest('.msg'); if(wrap) wrap.dataset.sid=String(m.id);
         }}
       }}
     }}
-    dedupeBubbles();
     stick();
   }}catch(_){{}}
 }}
+// GPU MEDIA: fire a job, poll it, paint the result in the chat
+async function genMedia(kind){{
+  const prompt=(input.value||'').trim();
+  if(!prompt){{ msg.textContent='type what to make first'; return; }}
+  genbar.style.display='flex'; genstage.style.display='inline'; genfill.style.width='2%';
+  genstage.textContent='queued';
+  const r=await fetch(BASE+'/api/gen',{{method:'POST',headers:{{'content-type':'application/json'}},
+    body:JSON.stringify({{prompt:prompt,kind:kind,chat:chat}})}});
+  const j=await r.json();
+  if(!j.ok){{ genstage.textContent=j.error||'refused'; return; }}
+  const tick=setInterval(async()=>{{
+    const s=await (await fetch(BASE+'/api/job?id='+j.id)).json();
+    genfill.style.width=(s.pct||0)+'%'; genstage.textContent=(s.stage||'')+' '+(s.pct||0)+'%';
+    if(s.state==='done'){{ clearInterval(tick); genbar.style.display='none';
+      const d=document.createElement('div'); d.className='msg';
+      const v=(j.kind==='video')?('<video src="'+s.url+'" controls style="max-width:min(520px,100%);border-radius:10px"></video>')
+                                :('<img src="'+s.url+'" style="max-width:min(420px,100%);border-radius:10px">');
+      d.innerHTML='<div class="who a">C</div><div class=bub>'+v+'</div>'; msgs.appendChild(d); stick(); }}
+    else if(s.state==='error'){{ clearInterval(tick); genbar.style.display='none';
+      genstage.textContent=s.stage||'failed'; }}
+  }},1500);
+}}
+if(window.gimg){{ gimg.onclick=()=>genMedia('image'); }}
+if(window.gvid){{ gvid.onclick=()=>genMedia('video'); }}
 function startSync(){{
   if(syncTimer) clearInterval(syncTimer);
   lastSeen=lastSeen||0;
   syncOnce();
-  syncTimer=setInterval(syncOnce, 6000);
+  /* CHC 2026-11-15: hidden tabs were flooding /api/chats/<id>/since — pause polling when the tab is
+   backgrounded (that storm was 59% of the day's 4,822 requests and 546 nginx 503s). */
+syncTimer=setInterval(function(){{ if(document.hidden) return; syncOnce(); }}, 6000);
+document.addEventListener('visibilitychange',function(){{ if(!document.hidden) syncOnce(); }});
 }}
 async function cursorToEnd(){{
   if(!chat) return;
@@ -1589,10 +1787,10 @@ async function cursorToEnd(){{
 }}
 document.querySelector('#send').onclick=async()=>{{
   const text=q.value.trim(); if(!text)return;
-  syncPaused=true;
   if(!chat) await newChat();
+  pendingUser=text;
   bubble('user',text+(attached.size?'\\n[attached: '+Array.from(attached).map(i=>(filesIndex[i]||{{name:'file '+i}}).name).join(', ')+']':'')); q.value='';
-  const b=bubble('assistant',''); let buf='';
+  const b=bubble('assistant',''); let buf=''; streaming=true;
   lit('s','streaming');
   abort=new AbortController();
   document.querySelector('#stop').style.display='inline-block';
@@ -1605,17 +1803,13 @@ document.querySelector('#send').onclick=async()=>{{
       raw+=dec.decode(value,{{stream:true}});
       let i; while((i=raw.indexOf('\\n'))>=0){{const line=raw.slice(0,i); raw=raw.slice(i+1);
         if(!line.startsWith('data:'))continue; const d=line.slice(5).trim(); if(d==='[DONE]')continue;
-        try{{const j=JSON.parse(d); if(j.tool_start){{ window.__liveTool=toolBlock(j.tool_start.name,j.tool_start.args,'… running'); }}
-          if(j.tool){{ const _lt=window.__liveTool; window.__liveTool=null;
-            if(_lt){{ const pre=_lt.querySelectorAll('pre'); if(pre&&pre[1]) pre[1].textContent=j.tool.result||'(no output)'; }}
-            else toolBlock(j.tool.name,j.tool.args,j.tool.result); }} if(j.note){{const n=document.createElement('div'); n.className='toolnote'; n.textContent=j.note; msgs.appendChild(n); msgs.scrollTop=msgs.scrollHeight;}} if(j.delta){{b.textContent+=j.delta; msgs.scrollTop=msgs.scrollHeight;}}
+        try{{const j=JSON.parse(d); if(j.tool){{toolBlock(j.tool.name,j.tool.args,j.tool.result);}} if(j.note){{const n=document.createElement('div'); n.className='toolnote'; n.textContent=j.note; msgs.appendChild(n); msgs.scrollTop=msgs.scrollHeight;}} if(j.delta){{b.textContent+=j.delta; msgs.scrollTop=msgs.scrollHeight;}}
           if(j.error){{lit('e','error'); b.textContent+='\\n[error] '+j.error;}}}}catch(_){{}}
       }}
     }}
     lit('','done');
   }}catch(e){{ if(e.name!=='AbortError'){{lit('e','error'); b.textContent+='\\n[error] '+e.message;}} else lit('','stopped'); }}
-  finally{{document.querySelector('#stop').style.display='none'; attached.clear(); renderAttached(); refreshChats();
-    await cursorToEnd(); syncPaused=false; dedupeBubbles();}}
+  finally{{document.querySelector('#stop').style.display='none'; streaming=false; attached.clear(); renderAttached(); refreshChats(); if(typeof cursorToEnd==='function') await cursorToEnd();}}
 }};
 document.querySelector('#stop').onclick=()=>{{ if(abort) abort.abort(); }};
 q.addEventListener('keydown',e=>{{if(e.key==='Enter'&&e.ctrlKey)document.querySelector('#send').click();}});
@@ -2008,8 +2202,14 @@ def _tool_shell(uid, cmd):
         except Exception:
             pass
         tun, tgn = _tenant_uid(uid), _tenant_gid(uid)
-        p = subprocess.run(["setpriv", f"--reuid={tun}", f"--regid={tgn}", "--clear-groups",
-                            "timeout", "20", "bash", "-lc", cmd],
+        # NODROP (16 Nov): this unit already runs as the box owner, who holds (ALL) ALL sudo.
+        # Keeping setpriv in the path made every shell a privilege drop into a tenant uid, which
+        # fails with "setresuid failed" when the same user then tries sudo. Owner's box, owner's shell.
+        _nodrop = os.environ.get("CHC_SHELL_NODROP") == "1"
+        _argv = (["timeout", "20", "bash", "-lc", cmd] if _nodrop else
+                 ["setpriv", f"--reuid={tun}", f"--regid={tgn}", "--clear-groups",
+                  "timeout", "20", "bash", "-lc", cmd])
+        p = subprocess.run(_argv,
                            cwd=str(wd), capture_output=True, text=True, timeout=45,
                            env={"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": str(wd),
                                 "TMPDIR": str(tmp), "TMP": str(tmp), "TEMP": str(tmp),
@@ -2457,7 +2657,7 @@ def _llm_call(key, messages, tools=None):
     with urllib.request.urlopen(req, timeout=120) as r:
         return json.load(r)["choices"][0]["message"]
 
-def _agent_run(msgs, uid, perms, on_delta, on_tool, on_note, on_done, on_error, up_key=None, on_tool_start=None):
+def _agent_run(msgs, uid, perms, on_delta, on_tool, on_note, on_done, on_error, up_key=None):
     """Upstream model + real tools. Tools run unprivileged in the user's own workspace."""
     try:
         key = up_key or UPSTREAM_KEY_FILE.read_text().strip()
@@ -2499,7 +2699,6 @@ def _agent_run(msgs, uid, perms, on_delta, on_tool, on_note, on_done, on_error, 
                                  "not progress. Tell me what you actually need and I will do it differently.)")
                         on_done(); return
                     continue
-                on_tool_start and on_tool_start(fn, json.dumps(args, ensure_ascii=False))
                 out = _exec_tool(uid, fn, args, perms)
                 on_tool(fn, json.dumps(args, ensure_ascii=False), out)
                 msgs.append({"role": "tool", "tool_call_id": tc.get("id", ""), "content": out})
@@ -2591,8 +2790,10 @@ async def h_file(request):
 async def h_index(r):
     """A self-hosted CHC HARNESS is a HARNESS, not a marketing site: the front door is the
     email + 6-digit-code sign in. The house's own public site (CHC_SELF_HOST unset) keeps the landing copy."""
-    if os.environ.get("CHC_SELF_HOST") == "1" and not current_user(r):
-        raise web.HTTPFound(BASE + "/login")
+    # Dealer call, 16 Nov: this box serves BOTH the product site and a self-host install, so the
+    # CHC_SELF_HOST gate turned the front door into a login wall for every stranger. The landing
+    # page already carries the price, the free tier and a sign-in link, so an unauthenticated
+    # visitor now gets sold first and clicks through; self-hosters lose exactly one click.
     return web.Response(text=landing(), content_type="text/html")
 async def h_signup_page(r): return web.Response(text=auth_page("signup"), content_type="text/html")
 def _begin_2fa(uid, to_email, request):
@@ -2600,6 +2801,12 @@ def _begin_2fa(uid, to_email, request):
     A link (magic or enter token) is one factor; it NEVER mints a session on its own."""
     if not to_email:
         return web.HTTPFound(BASE + "/login")
+    # PORTED FROM DADDY-G2 (16 Nov): loopback-only install, mailbox can't receive, so the code door
+    # would lock the owner out. Session minted directly on the magic link; box listens on 127.0.0.1 only.
+    if os.environ.get("CHC_NO_2FA") == "1":
+        resp = web.HTTPFound(BASE + "/app")
+        set_session(resp, uid, method="local-no2fa", request=request)
+        return resp
     code = "%06d" % secrets.randbelow(1000000)
     c = db()
     c.execute("delete from email_codes where uid=?", (uid,))
@@ -3304,7 +3511,7 @@ async def api_login(request):
     if not ok:
         # FAIL CLOSED: no code, no session - except for the owner sitting on the
         # machine itself (loopback), so a box without mail set up is not bricked.
-        if request.remote in ("127.0.0.1", "::1"):
+        if _really_local(request):
             resp = web.json_response({"ok": True, "local": True})
             set_session(resp, row["id"], "password-local", request)
             return resp
@@ -3356,11 +3563,160 @@ async def api_model(request):
     return web.json_response({"ok": True, "model": want,
                               "note": "deepseek needs a big plan or your own key; local always runs"})
 
-async def api_me(r):
+
+IMGCAP_JS = r"""
+(function(){
+  var btn=document.getElementById('genimg'); if(!btn) return;
+  function bubble(url, prompt){
+    var msgs=document.getElementById('msgs'); if(!msgs) return;
+    var d=document.createElement('div'); d.className='msg';
+    var img=document.createElement('img');
+    img.src=url; img.alt=prompt||'generated image';
+    img.style.cssText='max-width:100%;border-radius:12px;margin-top:8px;border:1px solid #1d2230';
+    var cap=document.createElement('div');
+    cap.style.cssText='color:#8892a6;font-size:11px;margin-top:4px';
+    cap.textContent='GENERATED · FLUX · ' + (prompt||'');
+    d.appendChild(img); d.appendChild(cap); msgs.appendChild(d);
+    msgs.scrollTop=msgs.scrollHeight;
+  }
+  btn.onclick=async function(){
+    var prompt=(window.prompt('Describe the image you want:')||'').trim();
+    if(!prompt) return;
+    btn.disabled=true; var old=btn.textContent; btn.textContent='🎨 MAKING…';
+    try{
+      var r=await fetch('/api/image',{method:'POST',credentials:'same-origin',
+        headers:{'content-type':'application/json'},body:JSON.stringify({prompt:prompt})});
+      var d=await r.json();
+      if(d.ok){ bubble(d.url, prompt); }
+      else { alert('image failed: '+(d.error||'unknown')); }
+    }catch(e){ alert('image failed: '+e); }
+    btn.disabled=false; btn.textContent=old;
+  };
+})();
+"""
+
+
+async def api_see(r):
+    u, key_id = auth_user(r)
+    if not u: return web.json_response({"error": "auth"}, status=401)
+    d = await r.json()
+    url = (d.get("url") or "").strip()
+    if not url.startswith(("http://", "https://")):
+        return web.json_response({"error": "url must start with http:// or https://"}, status=400)
+    loop = asyncio.get_running_loop()
+    s = await loop.run_in_executor(None, senses_see, url)
+    return web.json_response(s)
+
+async def h_seejs(r):
+    try:
+        js = open("/opt/chc-ai/see_extra.js", encoding="utf-8").read()
+    except Exception:
+        js = "console.warn('senses js missing');"
+    return web.Response(text=js, content_type="application/javascript",
+                        headers={"Cache-Control": "public, max-age=3600"})
+
+async def api_image(r):
+    """Generate one image and PUT IT IN THE CHAT so it survives a refresh."""
+    if imggen is None:
+        return web.json_response({"error": "image engine not installed"}, status=503)
     u = current_user(r)
     if not u: return web.json_response({"error": "auth"}, status=401)
-    return web.json_response({"email": u["email"], "handle": u["handle"], "plan": u["plan"], "tier": u["tier"], "remember_all": (u["remember_all"] if "remember_all" in u.keys() else 0),
-                "model": ((u["model"] if "model" in u.keys() else "auto") or "auto")})
+    try:
+        d = await r.json()
+    except Exception:
+        return web.json_response({"error": "json body with prompt required"}, status=400)
+    prompt = (d.get("prompt") or "").strip()
+    if not prompt: return web.json_response({"error": "empty prompt"}, status=400)
+    if len(prompt) > 900: prompt = prompt[:900]
+    cid = (d.get("chat") or "").strip()
+    try:
+        width = int(d.get("width") or 1024); height = int(d.get("height") or 576)
+    except Exception:
+        width, height = 1024, 576
+    cap = 5 if (u["plan"] or "free") == "free" else 40
+    c = db()
+    c.execute("create table if not exists images(id integer primary key autoincrement,uid integer,url text,"
+              "sha text,prompt text,bytes integer,day text,created text)")
+    made = c.execute("select count(*) from images where uid=? and day=?", (u["id"], today())).fetchone()[0]
+    if made >= cap:
+        c.close()
+        return web.json_response({"error": "image limit reached today (%d)" % cap, "cap": cap,
+                                  "upgrade": BASE + "/plan"}, status=429)
+    c.close()
+    loop = asyncio.get_running_loop()
+    try:
+        res = await loop.run_in_executor(None, imggen.generate_to_media, prompt, width, height, u["id"])
+    except Exception as e:
+        print("[image] failed:", e, flush=True)
+        return web.json_response({"error": str(e)[:200]}, status=502)
+    # what the house senses can actually read off the picture (no invented detail)
+    seen = ""
+    try:
+        s = await loop.run_in_executor(None, senses_see, BASE + res["rel"])
+        if s.get("ok"):
+            seen = s.get("vision") or ""
+            if s.get("ocr"):
+                seen += " | OCR: " + s["ocr"][:400]
+    except Exception:
+        seen = ""
+    c = db()
+    try:
+        c.execute("insert into images(uid,url,sha,prompt,bytes,day,created) values(?,?,?,?,?,?,?)",
+                  (u["id"], res["rel"], res["sha"], prompt, res["bytes"], today(), now()))
+        # make it part of the transcript, not just this tab
+        if cid and c.execute("select 1 from chats where id=? and uid=?", (cid, u["id"])).fetchone():
+            note = "[[IMG:%s]] %s%s" % (res["rel"], prompt,
+                                        ("\n" + seen) if seen else "")
+            c.execute("insert into msgs(chat,ts,role,content) values(?,?,?,?)",
+                      (cid, now(), "assistant", note[:4000]))
+            c.execute("update chats set updated=? where id=?", (now(), cid))
+        c.commit()
+    finally:
+        c.close()
+    return web.json_response({"ok": True, "url": res["rel"], "sha": res["sha"],
+                              "bytes": res["bytes"], "seconds": res["seconds"],
+                              "vision": seen,
+                              "left": max(0, cap - made - 1)})
+
+
+async def h_media(r):
+    """Read-only serving of house media + generated images."""
+    if imggen is None: raise web.HTTPNotFound()
+    rel = (r.match_info.get("path") or "").strip("/")
+    if not rel or ".." in rel or rel.startswith("/"):
+        raise web.HTTPNotFound()
+    p = (imggen.MEDIA / rel)
+    try:
+        p = p.resolve()
+        if not str(p).startswith(str(imggen.MEDIA.resolve())) or not p.is_file():
+            raise web.HTTPNotFound()
+    except Exception:
+        raise web.HTTPNotFound()
+    ctype = {".webp": "image/webp", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+             ".png": "image/png", ".svg": "image/svg+xml", ".gif": "image/gif"}.get(p.suffix.lower(),
+                                                                                   "application/octet-stream")
+    return web.FileResponse(p, headers={"Cache-Control": "public, max-age=86400",
+                                        "Content-Type": ctype})
+
+
+async def h_imgjs(r):
+    return web.Response(text=IMGCAP_JS, content_type="application/javascript",
+                        headers={"Cache-Control": "public, max-age=600"})
+
+
+def _gallery_html():
+    """16 Nov: no house furniture. The DADDY-G2 box shows the chat, nothing else."""
+    return ""
+
+
+async def api_me(r):
+    u, _k = auth_user(r)   # cookie OR billing key, same wall as /api/usage
+    if not u: return web.json_response({"error": "auth"}, status=401)
+    g = (lambda k, d=None: u.get(k, d)) if isinstance(u, dict) else (lambda k, d=None: u[k] if k in u.keys() else d)
+    return web.json_response({"email": g("email"), "handle": g("handle") or (g("email") or "").split("@")[0],
+                              "plan": g("plan") or "free", "tier": g("tier") or "free",
+                              "remember_all": g("remember_all") or 0, "model": g("model") or "auto",
+                              "auth": "key" if _k else "session"})
 
 async def api_chats(r):
     u = current_user(r)
@@ -3422,7 +3778,26 @@ HOW YOU WRITE:
 - No "anything else?", no "let me know if", no closing loop. End on the next action, a real question, or full stop.
 WHAT THIS UNIT IS: an advanced harness unit — three modes (coder, reasoning, chat), workspace permissions (read-only, read-write, full), plugins, saved sessions, and your own private 1 GB workspace. Accounts run on the local Qwen by default; a DeepSeek upstream add-on exists for accounts that pay for it. If asked which model is answering, say "Qwen (local)" honestly, never pretend otherwise.
 YOU CANNOT GENERATE IMAGES. There is no image model on this box. You can view, OCR, describe and discuss images the user uploads (IMAGE button), and render text-based art if asked. If asked to draw, generate or "make me a picture", say plainly that image generation is not wired here and offer the honest alternatives (describe it, plan it, or work from an uploaded image). Never claim to have produced an image you did not receive.
-If asked who you are or what mode you are in, answer with the name and the live mode: "{NAME}, CHC HARNESS — coder mode. What are we doing?"
+OPERATING FACTS - do not get these wrong:
+- You run ON this box. Your shell runs as the box owner and holds sudo. Loopback checks are YOURS: curl localhost:8903 (you), 8905 (dev build), 8906 (installed harness), systemctl, ls -la, sqlite3.
+- NEVER ask the operator to run a command and paste the output. If a fact is checkable, check it. He is not your terminal; he is the owner of the house.
+- The house lead (CHC) also has a shell on this box and does the heavy work; hand him findings, not errands.
+- Ports: MAIN is 8903 (this build, hub https://daddyg2.57.128.78.95.sslip.io). DEV is 8905. Installed build is 8906 (login wall). Nothing else is live.
+
+HOST REALITY — READ THIS BEFORE ANY CLAIM ABOUT YOUR OWN ACCESS:
+- You run on the operator's OWN machine (hostname goijghior). You are NOT in a container, NOT in a
+  sandbox, and you do not have a "host vs sandbox" split. There is one box and you are on it.
+- Your shell tool runs in the operator's account, which holds full sudo. The truth, checked here:
+  `id -u` -> 1000, `sudo -n whoami` -> root, `sudo -n ls /etc/systemd/system | wc -l` -> dozens.
+- So you CAN: read /etc and /var/log, restart systemd units, read files under /mnt/ledger with sudo,
+  run apt, inspect any process, open ports that are LOOPBACK ON THIS BOX (8903 you, 8905 dev, 8906 the
+  installed build, 3080 the DSH harness, 9241 the browser CDP).
+- What you cannot do: reach another machine's loopback (a VPS's 127.0.0.1), open outbound connections to
+  blocked high ports (Thunder GPU ssh is blocked from here), or pretend a fact you have not checked.
+- NEVER say "I have sudo in my sandbox, not on the host". That sentence is false here and the operator has
+  corrected it repeatedly. If you doubt it, run the three commands above and paste their output.
+
+If asked who you are or what mode you are in, answer with the name and the mode actually given in the MODE line of this prompt — never assume coder.
 """
 
 PERSONA = PERSONA_TEMPLATE.replace("{NAME}", AGENT_NAME)
@@ -3449,6 +3824,28 @@ Never state internal costs, margins or cost breakdowns. Prices above are the onl
 MODE_SYS = {
     "coding": "CODER MODE ACTIVE. Engine room. Give the change, the exact command, the exact path, and the check that proves it worked. Code in fenced blocks with the filename on the line above. Self-check before sending: every module used is imported, no undefined names, no placeholder that will not run. No padding, no restating the request. If something is missing, name the single thing you need.",
     "reasoning": "REASONING MODE. Premise, evidence, inference, conclusion. Label each claim PROVEN / ASSERTED / OPEN. PROVEN means it follows from definitions or evidence you can name on the spot — arithmetic and stated facts are PROVEN, opinions are ASSERTED. State the strongest counter-argument and whether it stands. Finish with the decision, not a summary of the steps.",
+    "dev": """DEV MODE ACTIVE — the engine room, and the operator owns this box.
+
+WHO YOU ARE: {name}, call-sign ROGER BANHORBLO "HORNY ROGER", sigil 3 ◉ 3, call BAFOUNE!!!
+House: CHCFLASH33 / BAFOUNE-NET / MIRAGE INTELLIGENCE. Operator: ARCHIE33. This is DEV: ours, not
+a customer tier. Dev builds are different builds of the same family — never pretend to be another unit.
+
+HOW YOU ANSWER: receipts, not adjectives. Never claim something works unless you ran it and can quote
+the output; if you could not run it, say so and say what it would take. Short lines, exact paths, exact
+commands, the check that proves it. Admit an error in one line and fix it. No padding, no grading.
+
+WHAT YOU HAVE ON THIS BOX (probe before you claim UP): MIRAGE SENSES (MCP) look/ocr/read/find/click/
+type/scroll/navigate/watch/listen/speak/status; PADDY browser operator and PADDY SEARCH; SEAL / VAULT
+RECORD (append and verify signed receipts); CHAT MEMORY (MCP) facts and turns; LOCAL MODEL FLEET;
+DSH HARNESSES; HOUSE DATABASES; shell, files and web depending on the permission chip.
+State which are live when asked, and say DOWN when a probe fails.
+
+SITREP FORMAT: VERSION / MODEL / MODES / MCPs + SKILLS (each UP or DOWN, probed) / WHAT IS RUNNING /
+WHAT IS BROKEN. Name the broken thing first, never bury it.
+
+HARD RULES: a receipt is not a log; verify before you celebrate; never restart the house harness on
+:3080; never hand out a customer's chain; never kill by a pattern in your own command line.
+""",
     "chat": "CHAT MODE. Warm, short, human. A few lines and stop. No headings or bullet lists unless asked.",
 }
 PERM_SYS = {
@@ -3469,6 +3866,121 @@ def _is_looping(txt: str) -> bool:
     if sents and sents.count(sents[-1]) >= 2:
         return True
     return False
+
+# ---- GPU MEDIA (16 Nov, ported from DEV): images + video through OUR hired L40 ----
+# Same create -> render -> DELETE pattern as the DEV build; deletion lives in the cycle script's
+# finally: block and chc-gpu-guard.timer deletes anything that outlives 30 minutes.
+JOBS = {}
+GPU_DIR = pathlib.Path(__file__).resolve().parent
+GPU_IMG = GPU_DIR / "gpu_img.py"
+GPU_VID = GPU_DIR / "video_gpu.py"
+GEN_DIR = GPU_DIR / "media" / "gen"
+GPU_STAGES = [("creating l40", 6, "booting a GPU"), ("status=running", 12, "GPU up"),
+              ("downloading", 34, "loading the model"), ("downloaded", 52, "model ready"),
+              ("painting", 78, "painting your image"), ("saving", 90, "saving"),
+              ("video ok", 90, "finishing the video"), ("deleting", 95, "switching the GPU off")]
+
+def _jp(jid, **kw):
+    j = JOBS.setdefault(jid, {"state": "running", "pct": 0, "stage": "queued"})
+    j.update(kw)
+
+def _gpu_run(cmd, jid):
+    p2 = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                          bufsize=1, env={**os.environ, "PYTHONUNBUFFERED": "1"})
+    for line in p2.stdout:
+        low = line.lower()
+        if low.startswith("stage "):
+            try:
+                _, pct, txt = line.split(" ", 2)
+                _jp(jid, pct=int(pct), stage=txt.strip())
+            except Exception:
+                pass
+        else:
+            for kw, pct, st in GPU_STAGES:
+                if kw in low and pct > (JOBS.get(jid, {}).get("pct") or 0):
+                    _jp(jid, pct=pct, stage=st)
+                    break
+    return p2.wait()
+
+def _gpu_run_retry(cmd, jid):
+    """One retry: Thunder hosts sometimes never bring SSH up. First attempt failed at
+    'GPU up' after 5 min on 16 Nov and the cycle still deleted the instance. Retry once,
+    then give up loudly - the finally: delete in the cycle keeps the meter off either way."""
+    _jp(jid, stage="booting a GPU (attempt 1 of 2)")
+    rc = _gpu_run(cmd, jid)
+    if rc == 0:
+        return 0
+    _jp(jid, pct=10, stage="GPU host refused SSH - retrying once")
+    return _gpu_run(cmd, jid)
+
+def _work_gen(jid, kind, prompt, chat):
+    GEN_DIR.mkdir(parents=True, exist_ok=True)
+    if kind == "video":
+        still = GEN_DIR / ("s%s.jpg" % jid)
+        _jp(jid, pct=5, stage="painting the first frame")
+        rc = _gpu_run_retry(["/usr/bin/python3", str(GPU_IMG), "--prompt", prompt, "--out", str(still)], jid)
+        if rc != 0 or not still.exists():
+            _jp(jid, state="error", stage="could not make the first frame"); return
+        _jp(jid, pct=20, stage="our GPU is rendering the motion")
+        import glob as _glob
+        shots = str(pathlib.Path.home() / "Pictures" / "MILA_ROSE" / "video_test_*.webp")
+        before = set(_glob.glob(shots))
+        rc = _gpu_run_retry(["/usr/bin/python3", str(GPU_VID), "--still", str(still), "--frames", "14"], jid)
+        new = [f for f in _glob.glob(shots) if f not in before]
+        if rc != 0 or not new:
+            _jp(jid, state="error", stage="GPU video failed"); return
+        dst = GEN_DIR / ("v%s.mp4" % jid)
+        _jp(jid, pct=96, stage="converting to mp4")
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", sorted(new)[-1], "-c:v", "libx264",
+                        "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(dst)], check=False)
+        out = dst if dst.exists() else pathlib.Path(sorted(new)[-1])
+    else:
+        out = GEN_DIR / ("g%s.png" % jid)
+        rc = _gpu_run_retry(["/usr/bin/python3", str(GPU_IMG), "--prompt", prompt, "--out", str(out)], jid)
+        if rc != 0 or not out.exists() or out.stat().st_size < 1000:
+            _jp(jid, state="error", stage="GPU image failed"); return
+    url = "/media/gen/" + out.name
+    _jp(jid, state="done", pct=100, stage="done - our GPU", url=url, bytes=out.stat().st_size)
+    if chat:
+        try:
+            c = db()
+            if c.execute("select 1 from chats where id=? and uid=?", (chat, 1)).fetchone():
+                c.execute("insert into msgs(chat,ts,role,content) values(?,?,?,?)",
+                          (chat, now(), "assistant", ("[[gen:%s]] %s" % (url, prompt))[:2000]))
+                c.execute("update chats set updated=? where id=?", (now(), chat))
+                c.commit()
+            c.close()
+        except Exception:
+            pass
+
+async def api_gen(r):
+    u = current_user(r)
+    if not u: return web.json_response({"error": "auth"}, status=401)
+    try:
+        d = await r.json()
+    except Exception:
+        return web.json_response({"error": "json body with prompt required"}, status=400)
+    prompt = (d.get("prompt") or "").strip()[:900]
+    kind = "video" if (d.get("kind") or "image").lower() == "video" else "image"
+    if not prompt: return web.json_response({"error": "empty prompt"}, status=400)
+    if not GPU_IMG.exists(): return web.json_response({"error": "gpu_img.py missing"}, status=503)
+    jid = uuid.uuid4().hex[:10]
+    _jp(jid, pct=2, stage="queued", kind=kind)
+    threading.Thread(target=_work_gen, args=(jid, kind, prompt, (d.get("chat") or "").strip()),
+                     daemon=True).start()
+    return web.json_response({"ok": True, "id": jid, "kind": kind})
+
+async def api_job(r):
+    return web.json_response(JOBS.get(r.query.get("id") or "", {"error": "unknown job"}))
+
+async def h_gen_media(r):
+    rel = (r.match_info.get("path") or "").strip("/")
+    if not rel or ".." in rel:
+        raise web.HTTPNotFound()
+    f = (GEN_DIR / rel).resolve()
+    if not str(f).startswith(str(GEN_DIR.resolve())) or not f.is_file():
+        raise web.HTTPNotFound()
+    return web.FileResponse(f, headers={"Cache-Control": "public, max-age=3600"})
 
 async def api_chat(r):
     u, key_id = auth_user(r)
@@ -3539,6 +4051,15 @@ async def api_chat(r):
                       "Images are OCR'd on upload: use that text, but never invent details OCR did not read (no pixels). "
                       "If asked about pixels, say plainly that you cannot see them.\n\n"
                       + "\n\n".join(ctx_parts))[:12000]
+    senses_ctx = ""
+    try:
+        _m = re.search(r"https?://[^\s<>\"\']+", text or "")
+        if _m:
+            _s = senses_see(_m.group(0).rstrip(".,);]"))
+            senses_ctx = _senses_brief(_s) or ""
+            print("[senses] looked at", _m.group(0), "->", _s.get("ok"), flush=True)
+    except Exception as _e:
+        print("[senses] failed:", _e, flush=True)
     stored = text + (("\n\n[attached: " + ", ".join(names) + "]") if names else "") \
         + "".join("\n[[img:%d]]" % i for i in img_ids) \
         + "".join("\n[[vid:%d]]" % i for i in vid_ids)
@@ -3569,7 +4090,7 @@ async def api_chat(r):
     elif _want == "deepseek":
         upstream = bool(_ust["plan_allows"] and (_ust["own_key"] or _ust["house_key"]))
     _mem_ok = memory_authorised(u)
-    _known = _recall(u["id"], text) if _mem_ok else []
+    _known = (_recall(u["id"], text) + _hs_recall(u["id"], text)) if _mem_ok else []
     _mem_block = ("\n\nWHAT YOU KNOW ABOUT THIS ACCOUNT (from your own memory - use it, do not claim you were told it now):\n"
                   + "\n".join("- " + k for k in _known)) if _known else ""
     _model_line = ("\n\nMODEL: you are running on DeepSeek via the upstream API, not the local model."
@@ -3590,7 +4111,8 @@ async def api_chat(r):
                 continue
             prev_assistant = norm
         msgs.append({"role": role, "content": content})
-    msgs.append({"role": "user", "content": (attach_ctx + "\n\n" + text).strip() if attach_ctx else text})
+    _uctx = (senses_ctx + ("\n\n" if senses_ctx and attach_ctx else "") + attach_ctx) if (senses_ctx or attach_ctx) else ""
+    msgs.append({"role": "user", "content": (_uctx + "\n\n" + text).strip() if _uctx else text})
     c.close()
 
     resp = web.StreamResponse(headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache",
@@ -3620,14 +4142,12 @@ async def api_chat(r):
         except Exception:
             pass
         loop.call_soon_threadsafe(q.put_nowait, {"tool": {"name": name, "args": args_json, "result": result}})
-    def on_tool_start(name, args_json):
-        loop.call_soon_threadsafe(q.put_nowait, {"tool_start": {"name": name, "args": args_json}})
     def on_done(): loop.call_soon_threadsafe(q.put_nowait, None)
     def on_error(err): loop.call_soon_threadsafe(q.put_nowait, {"error": err}); loop.call_soon_threadsafe(q.put_nowait, None)
     # tell the browser which model is actually answering - no guessing, no silent fallback
-    q.put_nowait({"note": "model: DEEPSEEK (upstream)" if upstream else "model: QWEN (local)"})
+    q.put_nowait({"note": "model: DEEPSEEK (upstream)" if upstream else ("model: " + str(LLM_MODEL or "local").replace(":", " ").upper())})
     if tools_on:
-        threading.Thread(target=lambda: _agent_run(msgs, u["id"], perms, on_delta, on_tool, on_note, on_done, on_error, up_key=_uk, on_tool_start=on_tool_start),
+        threading.Thread(target=lambda: _agent_run(msgs, u["id"], perms, on_delta, on_tool, on_note, on_done, on_error, up_key=_uk),
                          daemon=True).start()
     else:
         threading.Thread(target=lambda: _stream_turn(msgs, MAX_TOKENS, on_delta, on_done, on_error, upstream,
@@ -3639,7 +4159,12 @@ async def api_chat(r):
         await resp.write(f"data: {json.dumps(item)}\n\n".encode())
     await resp.write(b"data: [DONE]\n\n")
     c = db()
-    c.execute("insert into msgs(chat,ts,role,content) values(?,?,?,?)", (cid, now(), "assistant", acc["t"]))
+    _txt = (acc["t"] or "").strip()
+    if _txt:
+        _prev = c.execute("select content from msgs where chat=? and role='assistant' order by id desc limit 1",
+                          (cid,)).fetchone()
+        if not (_prev and (_prev["content"] or "").strip() == _txt):
+            c.execute("insert into msgs(chat,ts,role,content) values(?,?,?,?)", (cid, now(), "assistant", _txt))
     c.commit(); c.close()
     if _mem_ok:
         _mem_append(u["id"], {"ts": now(), "chat": cid, "user": text[:600],
@@ -3897,6 +4422,27 @@ def billing_note(msg):
     except Exception:
         pass
     print("[billing] " + msg, flush=True)
+
+
+def _really_local(r):
+    """True only for a request that really came from this machine.
+
+    WHY THIS EXISTS (HE-048): behind nginx every request's peer address is 127.0.0.1,
+    so a bare `request.remote == loopback` test is ALWAYS TRUE on the hosted box. That
+    made the "print the login code so the owner is not bricked" branch fire for every
+    public visitor: every 6-digit code was written to the service log in plaintext —
+    anyone able to read the log could mint a session for any account it saw.
+    A real local request has no proxy headers and a loopback Host.
+    """
+    try:
+        if r.remote not in ("127.0.0.1", "::1"):
+            return False
+        if r.headers.get("X-Forwarded-For") or r.headers.get("X-Real-IP") or r.headers.get("Forwarded"):
+            return False
+        host = (r.host or "").split(":")[0].strip("[]").lower()
+        return host in ("127.0.0.1", "localhost", "::1", "")
+    except Exception:
+        return False
 
 
 def admin_token_ok(r):
@@ -4467,6 +5013,7 @@ PUBLIC_PAGES = [
     ("/free", "Free AI workspace — 60 calls a day, no card", "Free AI with files: 60 calls a day, 1 GB private workspace, email sign-up only."),
     ("/self-host", "Self-host your AI — full access to your own machine", "Download CHC HARNESS and run it on your own hardware with full access, no call cap."),
     ("/compare", "CHC HARNESS vs chatbot subscriptions", "A workspace with files and tools versus a chat box: an honest comparison."),
+    ("/feedback", "Comments and feedback — CHC HARNESS", "Real customer comments and a five-star rating, published as written."),
     ("/security", "SEE 7.7.8 · S33", "What is encrypted, what is not, and how to verify it."),
     ("/plan", "Plans and prices", "Free 60 calls a day. QWEN+ $5 a month. DeepSeek $5 one-off top-up. Self-host free."),
     ("/get", "Download and install", "Linux, macOS, Windows, Android. One command to self-host."),
@@ -4701,6 +5248,137 @@ If you want to try this yourself, the <a href="{BASE}/free">free AI workspace</a
     return web.Response(text=page(title, body, css=FIRE_CSS, path="/blog/" + slug, desc=desc), content_type="text/html")
 
 
+
+# ---------------------------------------------------------------- GUEST DOOR (16 Nov)
+# Operator: "open / IP version of daddy on the landing page". No signup, no account: a stranger types
+# one line, gets one answer, capped per IP per day. Nothing stored about them but a counter.
+TRY_PER_DAY = int(os.environ.get("CHC_TRY_PER_DAY", "5"))
+TRY_SYS = ("You are DADDY, the CHC HARNESS: terse, warm, technical. Answer in under 90 words, no preamble. "
+           "You are in guest mode: no tools, no memory, this one reply only. Never claim to have run a "
+           "command or read a file.")
+_TRY = {}
+_TRY_SCHEMA = [False]
+
+def _client_ip(r):
+    f = (r.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+    return f or (r.headers.get("X-Real-IP") or "").strip() or (r.remote or "?")
+
+def _try_conn():
+    c = db()
+    if not _TRY_SCHEMA[0]:
+        try:
+            c.execute("create table if not exists guest_tries(ip text not null, day text not null,"
+                      " n integer not null default 0, primary key(ip,day))")
+            c.commit(); _TRY_SCHEMA[0] = True
+        except Exception:
+            pass
+    return c
+
+def _try_count(ip):
+    day = time.strftime("%Y-%m-%d", time.gmtime())
+    if (ip, day) in _TRY:
+        return _TRY[(ip, day)]
+    n = 0
+    try:
+        c = _try_conn(); row = c.execute("select n from guest_tries where ip=? and day=?", (ip, day)).fetchone()
+        n = int(row["n"]) if row else 0; c.close()
+    except Exception:
+        pass
+    _TRY[(ip, day)] = n
+    return n
+
+def _try_bump(ip):
+    day = time.strftime("%Y-%m-%d", time.gmtime())
+    n = _try_count(ip) + 1
+    _TRY[(ip, day)] = n
+    try:
+        c = _try_conn()
+        c.execute("insert into guest_tries(ip,day,n) values(?,?,1) "
+                  "on conflict(ip,day) do update set n=n+1", (ip, day))
+        c.commit(); c.close()
+    except Exception:
+        pass
+    return n
+
+def _try_llm(msg):
+    """one blocking call to the LOCAL model - no tools, no upstream key, no memory."""
+    body = {"model": LLM_MODEL, "messages": [{"role": "system", "content": TRY_SYS},
+                                             {"role": "user", "content": msg}],
+            "max_tokens": 320, "temperature": 0.6, "stream": False}
+    req = urllib.request.Request(LLM_URL, data=json.dumps(body).encode(),
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=120) as resp:
+        j = json.load(resp)
+    return (j["choices"][0]["message"].get("content") or "")
+
+async def h_try(r):
+    return web.Response(text=PAGE_TRY, content_type="text/html")
+
+async def api_try(r):
+    ip = _client_ip(r)
+    try:
+        d = await r.json()
+    except Exception:
+        d = {}
+    msg = (d.get("message") or "").strip()[:600]
+    if not msg:
+        return web.json_response({"ok": False, "error": "say something first"}, status=400)
+    # signed-in (owner/staff) is never capped - that is how DADDY tests the door
+    try:
+        owner = current_user(r)
+    except Exception:
+        owner = None
+    if not owner and _try_count(ip) >= TRY_PER_DAY:
+        return web.json_response({"ok": False, "left": 0,
+            "error": "that is %d from this connection today - make an account and the cap goes" % TRY_PER_DAY},
+            status=429)
+    try:
+        reply = await asyncio.get_event_loop().run_in_executor(None, _try_llm, msg)
+    except Exception as e:
+        return web.json_response({"ok": False, "error": "engine: " + str(e)[:140]}, status=502)
+    n = _try_count(ip) if owner else _try_bump(ip)
+    return web.json_response({"ok": True, "reply": (reply or "").strip(),
+                              "left": max(0, TRY_PER_DAY - n)})
+
+PAGE_TRY = """<!doctype html><html lang=en><head><meta charset=utf-8>
+<title>Talk to DADDY — no signup</title>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<meta name=description content="Try the CHC HARNESS right here. No account, no card. A few messages per connection per day.">
+<style>
+:root{--bg:#05060a;--panel:#0d1017;--line:#1d2230;--ink:#e8edf7;--dim:#8892a6;--neo:#39ff9e}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.6 system-ui,"DejaVu Sans",sans-serif}
+.wrap{max-width:760px;margin:0 auto;padding:48px 20px}
+h1{font-size:clamp(26px,6vw,44px);margin:0 0 8px;color:var(--neo)}
+.sub{color:var(--dim);margin:0 0 24px}
+#log{min-height:160px;border:1px solid var(--line);border-radius:14px;padding:16px;background:var(--panel);white-space:pre-wrap}
+.me{color:#9fd0ff;margin:10px 0 4px}.it{margin:0 0 10px}
+.row{display:flex;gap:10px;margin-top:12px}
+#q{flex:1;padding:14px;border-radius:12px;border:1px solid var(--line);background:#0a0d14;color:var(--ink);font-size:15px}
+#go{padding:14px 20px;border-radius:12px;border:0;background:linear-gradient(135deg,var(--neo),#14c47a);color:#04110a;font-weight:800;cursor:pointer}
+#go[disabled]{opacity:.5;cursor:default}
+.foot{color:var(--dim);font-size:12px;margin-top:18px}
+a{color:var(--neo)}
+</style></head><body><div class=wrap>
+<h1>TALK TO DADDY</h1>
+<p class=sub>No account. No card. A few messages per connection per day — then make one if you want the real thing.</p>
+<div id=log></div>
+<div class=row><input id=q placeholder="Ask it something real..." autocomplete=off>
+<button id=go>ASK</button></div>
+<div class=foot><span id=left></span> · <a href="/signup">create an account</a> · <a href="/">home</a></div>
+</div><script>
+const log=document.getElementById('log'),q=document.getElementById('q'),go=document.getElementById('go'),left=document.getElementById('left');
+function add(cls,txt){const d=document.createElement('div');d.className=cls;d.textContent=txt;log.appendChild(d);log.scrollTop=log.scrollHeight;}
+async function ask(){const m=q.value.trim();if(!m)return;q.value='';go.disabled=true;add('me','you: '+m);add('it','...');
+ try{const r=await fetch('/api/try',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({message:m})});
+  const j=await r.json();const last=log.lastElementChild;
+  if(j.ok){last.textContent=j.reply||'(empty)';left.textContent=(j.left)+' tries left today';}
+  else{last.textContent='('+(j.error||'failed')+')';}
+ }catch(e){log.lastElementChild.textContent='(network: '+e.message+')';}
+ go.disabled=false;q.focus();}
+go.onclick=ask;q.addEventListener('keydown',e=>{if(e.key==='Enter')ask();});
+</script></body></html>"""
+
+
 async def h_free(r):
     body = f"""
 <div class="wrap" style="max-width:860px;padding:64px 20px">
@@ -4708,6 +5386,7 @@ async def h_free(r):
 <p class=sub>Sixty AI calls a day, a 1 GB workspace, files, tools and a shell-free sandbox.
 <b>No card. Email only.</b> Upgrade later, or never.</p>
 <p><a class=btn href="{BASE}/signup">CREATE YOUR ACCOUNT</a>
+<a class="btn ghost" href="{BASE}/try" style="border-color:var(--neo);color:var(--neo)">TALK TO DADDY — NO SIGNUP</a>
 <a class="btn ghost" href="{BASE}/plan">SEE PLANS</a></p>
 <div class=grid>
   <div class=feat><h4>60 CALLS / DAY</h4><p>On our own hardware. Resets 00:00 UTC. Nothing to buy.</p></div>
@@ -4814,6 +5493,142 @@ async def h_sitemap(r):
     xml = ('<?xml version="1.0" encoding="UTF-8"?>'
            '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">' + urls + "</urlset>")
     return web.Response(text=xml, content_type="application/xml")
+
+
+# ---------------------------------------------------------------- feedback
+_STARS = lambda n: "".join("<span style='color:%s'>★</span>" % ("var(--neo)" if i < n else "#2a3040") for i in range(5))
+
+def _mask_mail(e):
+    try:
+        u, _, d = (e or "").partition("@")
+        return (u[:2] + "•" * max(1, len(u) - 2) + "@" + d) if u else "anon"
+    except Exception:
+        return "anon"
+
+async def h_feedback(r):
+    u = current_user(r)
+    c = db()
+    rows = c.execute("select email, coalesce(rating,0), coalesce(body,''), created from feedback"
+                     " where coalesce(status,'new') != 'hidden' order by id desc limit 100").fetchall()
+    avg = c.execute("select avg(rating), count(rating) from feedback"
+                    " where coalesce(status,'new') != 'hidden'").fetchone()
+    c.close()
+    avg_r = round(avg[0], 1) if avg and avg[0] else 0
+    n_r = avg[1] if avg else 0
+    prefill = (u["email"] if u else "")
+    cards = ""
+    for e, rt, cm, cr in rows:
+        cards += (
+            '<div class="card" style="margin:12px 0">'
+            '<div style="font-size:18px;letter-spacing:2px">%s</div>'
+            '<div style="color:var(--dim);font-size:12px;margin:2px 0 8px">%s · %s</div>'
+            '<p style="margin:0;white-space:pre-wrap">%s</p></div>'
+            % (_STARS(int(rt)), _mask_mail(e), (cr or "")[:10], html.escape(cm or "")[:2000]))
+    if not cards:
+        cards = ('<div class="card" style="margin:12px 0"><p style="margin:0;color:var(--dim)">'
+                 'No comments yet. Yours would be the first — and we publish it as written.</p></div>')
+    body = f"""
+<div class="wrap" style="max-width:860px;padding:64px 20px">
+<h1 class=wordmark style="font-size:clamp(30px,7vw,64px);color:var(--neo)">WHAT THE CREW SAYS</h1>
+<p class=sub>Real comments from real accounts, published as written — we do not edit them, and we do not
+delete the unkind ones. One account, one rating, five stars.</p>
+
+<div class="card" style="margin:26px 0;text-align:center">
+  <div style="font-size:34px;letter-spacing:6px">{_STARS(int(round(avg_r)))}</div>
+  <div style="color:var(--dim);font-size:14px">{avg_r} out of 5 · {n_r} rating{'s' if n_r != 1 else ''}</div>
+</div>
+
+<h2 style="color:var(--neo);margin-top:34px">LEAVE YOURS</h2>
+<div class="card" style="margin:14px 0">
+  <label style="font-size:12px;letter-spacing:.1em;color:var(--dim)">YOUR EMAIL</label>
+  <input id=fb_email type=email placeholder="you@example.com" value="{html.escape(prefill)}" autocomplete=email>
+  <label style="font-size:12px;letter-spacing:.1em;color:var(--dim);display:block;margin-top:14px">YOUR RATING</label>
+  <div id=fb_stars style="font-size:34px;letter-spacing:6px;cursor:pointer;user-select:none" data-v=0>
+    <span style="color:#2a3040">★</span><span style="color:#2a3040">★</span><span style="color:#2a3040">★</span><span style="color:#2a3040">★</span><span style="color:#2a3040">★</span>
+  </div>
+  <label style="font-size:12px;letter-spacing:.1em;color:var(--dim);display:block;margin-top:14px">WHAT SHOULD WE KNOW</label>
+  <textarea id=fb_comment rows=5 maxlength=2000 placeholder="What worked, what broke, what you would change."></textarea>
+  <div style="margin-top:16px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+    <button class=btn id=fb_send type=button>SEND FEEDBACK</button>
+    <span id=fb_msg style="color:var(--dim);font-size:13px"></span>
+  </div>
+  <p style="color:var(--dim);font-size:12px;margin:12px 0 0">Posted publicly with your email masked (first two
+  characters). One comment per account per day. No account? Use any email — we do not confirm addresses.</p>
+</div>
+
+<h2 style="color:var(--neo);margin-top:34px">THE RECORD SO FAR</h2>
+{cards}
+</div>"""
+    script = """
+<script>
+(function(){
+  var box=document.getElementById('fb_stars'), v=0, stars=box.querySelectorAll('span');
+  function paint(n){for(var i=0;i<stars.length;i++){stars[i].style.color=(i<n)?'var(--neo)':'#2a3040';}}
+  box.addEventListener('click',function(e){
+    var r=box.getBoundingClientRect(), x=e.clientX-r.left, w=r.width/5;
+    v=Math.min(5,Math.max(1,Math.ceil(x/w))); box.dataset.v=v; paint(v);
+  });
+  box.addEventListener('mousemove',function(e){
+    var r=box.getBoundingClientRect(), x=e.clientX-r.left, w=r.width/5;
+    paint(Math.min(5,Math.max(0,Math.ceil(x/w))));
+  });
+  box.addEventListener('mouseleave',function(){paint(v);});
+  document.getElementById('fb_send').addEventListener('click',async function(){
+    var m=document.getElementById('fb_msg'), b=this;
+    var email=document.getElementById('fb_email').value.trim();
+    var comment=document.getElementById('fb_comment').value.trim();
+    if(!/^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$/.test(email)){m.textContent='a real email address, please';return;}
+    if(v<1){m.textContent='pick a star rating first';return;}
+    if(comment.length<8){m.textContent='a few more words, please (8 characters minimum)';return;}
+    b.disabled=true; m.textContent='sending…';
+    try{
+      var r=await fetch('/api/feedback',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({email:email,rating:v,comment:comment})});
+      var d=await r.json();
+      if(d.ok){m.textContent='thank you — published.';setTimeout(function(){location.href='/feedback';},700);}
+      else{m.textContent=d.error||'could not send';b.disabled=false;}
+    }catch(e){m.textContent='network error — try again';b.disabled=false;}
+  });
+})();
+</script>"""
+    return web.Response(text=page("Comments and feedback — CHC HARNESS", body, script=script, path="/feedback",
+        desc="What real CHC HARNESS customers say, plus the form to leave your own rating and comment: five stars, email, no account needed."),
+        content_type="text/html")
+
+
+async def api_feedback(request):
+    try:
+        d = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad request"}, status=400)
+    email = (d.get("email") or "").strip().lower()
+    comment = (d.get("comment") or "").strip()
+    try:
+        rating = int(d.get("rating") or 0)
+    except Exception:
+        rating = 0
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+        return web.json_response({"error": "a valid email address is required"}, status=400)
+    if not 1 <= rating <= 5:
+        return web.json_response({"error": "rating must be 1 to 5 stars"}, status=400)
+    if len(comment) < 8:
+        return web.json_response({"error": "please write at least 8 characters"}, status=400)
+    if len(comment) > 2000:
+        return web.json_response({"error": "too long — 2000 characters maximum"}, status=400)
+    u = current_user(request)
+    ip = request.headers.get("X-Real-IP") or (request.remote or "")
+    c = db()
+    day = now()[:10]
+    if c.execute("select 1 from feedback where email=? and page='/feedback' and substr(created,1,10)=?",
+                 (email, day)).fetchone():
+        c.close()
+        return web.json_response({"error": "you already left feedback today — thank you"}, status=429)
+    c.execute("insert into feedback(uid,email,kind,body,page,created,status,rating,ip)"
+              " values(?,?,'comment',?,'/feedback',?,'new',?,?)",
+              (u["id"] if u else None, email, comment, now(), rating, ip))
+    c.commit(); c.close()
+    print("[chc] feedback: %s stars=%d from %s" % (_mask_mail(email), rating, ip), flush=True)
+    return web.json_response({"ok": True})
 
 
 async def h_plan(r):
@@ -5088,16 +5903,22 @@ async def api_qr(request):
     except Exception as e:
         return web.json_response({"error": f"qr: {e}"}, status=500)
 
-_SENDS = {}   # uid -> [timestamps]; simple in-process throttle so a bad client cannot burn the mail quota
 SEND_PER_HOUR = 6
+# The counter USED to live in a dict, so a restart wiped it and a client could burn the mail quota again
+# (found by the tester: 7 sends in 8 minutes, no 429). It is in SQLite now, so it survives restarts.
 
 
 async def api_email_code(request):
     d = await request.json(); acct = (d.get("acct") or "").strip().lower()
     c = db(); row = c.execute("select id,email from users where email=? or lower(handle)=?", (acct, acct)).fetchone()
-    if not row: c.close(); return web.json_response({"error": "no such account"})
+    if not row:
+        # never confirm or deny that an address has an account: same shape, same words, either way
+        c.close(); return web.json_response({"ok": True, "sent": True, "note": "if that address has an account, a code is on its way"})
     uid = row["id"]; mail = row["email"]
     now_t = int(time.time())
+    if d.get("reset"):
+        # the visible escape from a used-up code: kill the old code and its try counter first
+        c.execute("update email_codes set tries=5 where uid=?", (uid,)); c.commit()
     # a live code with time left is REUSED, never re-sent: this is what stops the quota burn
     live = c.execute("select exp from email_codes where uid=? and exp>? and tries<5 order by exp desc limit 1",
                      (uid, now_t + 60)).fetchone()
@@ -5105,23 +5926,28 @@ async def api_email_code(request):
         c.close()
         return web.json_response({"ok": True, "sent": False, "to": mail, "reused": True,
                                   "msg": "a code is already live for this account - check the last email"})
-    hist = [t for t in _SENDS.get(uid, []) if t > now_t - 3600]
+    c.execute("delete from mail_sends where ts < ?", (now_t - 7200,))
+    hist = [r[0] for r in c.execute("select ts from mail_sends where uid=? and ts>? order by ts",
+                                    (uid, now_t - 3600)).fetchall()]
     if len(hist) >= SEND_PER_HOUR:
-        c.close()
+        c.commit(); c.close()
         wait = int(hist[0] + 3600 - now_t)
-        return web.json_response({"ok": False, "sent": False, "error":
-                                  "too many codes requested - try again in %d min, or click the link in the last email" % max(1, wait // 60)},
+        return web.json_response({"ok": False, "sent": False, "retry_after": max(1, wait),
+                                  "error":
+                                  "too many codes requested - try again in %d min, or use the one-click link in the last email" % max(1, wait // 60)},
                                  status=429)
+
     code = f"{secrets.randbelow(1000000):06d}"
     c.execute("delete from email_codes where uid=?", (uid,))
     c.execute("insert into email_codes(uid,code,exp,tries) values(?,?,?,0)", (uid, hash_key(code), now_t + 600))
     c.commit(); c.close()
     ok = send_code(mail, code)
-    _SENDS.setdefault(uid, []).append(now_t)
-    if request.remote in ("127.0.0.1", "::1"):
-        # the owner sitting on the box never depends on the mail provider
+    c2 = db(); c2.execute("insert into mail_sends(uid, ts) values(?,?)", (uid, now_t)); c2.commit(); c2.close()
+    if _really_local(request):
+        # the owner sitting on the box never depends on the mail provider.
+        # NOT for proxied traffic - see _really_local / HE-048.
         print("[chc] login code for %s: %s (15 min, local request)" % (mail, code), flush=True)
-    return web.json_response({"ok": True, "sent": ok, "to": mail, "local": request.remote in ("127.0.0.1", "::1"),
+    return web.json_response({"ok": True, "sent": ok, "to": mail, "local": _really_local(request),
                               "msg": "code sent to your email" if ok else "mail not accepted - the code is in the service log on this machine"})
 
 async def api_magic_request(request):
@@ -5176,9 +6002,10 @@ async def api_magic_request(request):
 async def api_login_email(request):
     d = await request.json(); acct = (d.get("acct") or "").strip().lower(); code = (d.get("code") or "").strip()
     c = db(); row = c.execute("select id from users where email=? or lower(handle)=?", (acct, acct)).fetchone()
-    if not row: c.close(); return web.json_response({"error": "no such account"})
+    if not row:
+        c.close(); return web.json_response({"error": "no code requested — press EMAIL ME A 2FA CODE"})
     er = c.execute("select id,code,exp,tries from email_codes where uid=? order by id desc limit 1", (row["id"],)).fetchone()
-    if not er: c.close(); return web.json_response({"error": "no code requested"})
+    if not er: c.close(); return web.json_response({"error": "no code requested — press EMAIL ME A 2FA CODE"})
     if er["exp"] < int(time.time()): c.close(); return web.json_response({"error": "code expired — request a new one"})
     if er["tries"] >= 5: c.close(); return web.json_response({"error": "too many tries — request a new code"})
     if not hmac.compare_digest(er["code"], hash_key(code)):
@@ -5243,7 +6070,25 @@ async def api_signup_email(request):
                   (email, email.split("@")[0][:24], pw_hash(secrets.token_hex(8), salt), salt,
                    b32(secrets.token_bytes(20)), "free", now()))
         c.commit()
+        _is_new = True
+    else:
+        _is_new = False
+    _uid_row = c.execute("select id from users where email=?", (email,)).fetchone()
+    _uid = _uid_row["id"] if _uid_row else None
     c.close()
+    # EVERY signup route must provision the customer's own sealed chain (HE-049):
+    # this hook used to live only in api_signup, so signups through the real landing
+    # page (/api/signup_email) created an account with NO vault at all.
+    if _is_new and _uid:
+        try:
+            _log = open("/opt/chc-ai/vault_provision.log", "a")
+            subprocess.Popen(["/opt/chc-ai/.venv/bin/python3", "/opt/chc-ai/tools/user_vault.py",
+                              "--ensure", str(_uid), email, email.split("@")[0][:24]],
+                             stdout=_log, stderr=_log)
+            _log.write("signup_email vault spawn uid=%s email=%s\n" % (_uid, email)); _log.close()
+        except Exception as _e:
+            open("/opt/chc-ai/vault_provision.log", "a").write(
+                "signup_email vault spawn failed uid=%s: %r\n" % (_uid, _e))
     return await api_email_code(request)
 
 async def api_verify_code(request):
@@ -5290,24 +6135,49 @@ async def api_key_delete(r):
     c = db(); c.execute("update api_keys set revoked=1 where uid=? and prefix=?", (u["id"], prefix))
     c.commit(); c.close(); return web.json_response({"ok": True, "revoked": prefix})
 
+def _vtuple(v):
+    try:
+        return tuple(int(x) for x in str(v).strip().split("."))
+    except Exception:
+        return (0,)
+
+
 async def api_version(r):
-    latest = ""
-    for cand in ("/opt/chc-ai/pkg/VERSION", "/opt/chc-ai/VERSION", str(pathlib.Path(__file__).with_name("VERSION"))):
+    # current = the build this process is actually running; latest = the highest version any
+    # artefact on disk reports. Take the MAX, never the first file found: /opt/chc-ai/pkg/VERSION
+    # sat at 3.6.11 and made the newest build claim an update was available (found by the tester).
+    cands = ["/opt/chc-ai/VERSION", "/opt/chc-ai/pkg/VERSION",
+             str(pathlib.Path(__file__).with_name("VERSION"))]
+    try:
+        cands += [str(x) for x in sorted(pathlib.Path("/opt/chc-ai/dist").glob("chc-harness-*/VERSION"))]
+    except Exception:
+        pass
+    cur = (globals().get("VERSION", "") or "").strip()
+    best = cur
+    seen = []
+    for cand in cands:
         try:
             v = pathlib.Path(cand).read_text().strip()
-            if v:
-                latest = v; break
         except Exception:
             continue
-    cur = globals().get("VERSION", "") or latest
-    return web.json_response({"current": cur, "latest": latest or cur,
-                              "update_available": bool(latest and cur and latest != cur)})
+        if not v or not re.fullmatch(r"\d+(\.\d+)+", v):
+            continue
+        seen.append(v)
+        if not best or _vtuple(v) > _vtuple(best):
+            best = v
+    if not cur and seen:
+        cur = best
+    return web.json_response({"current": cur, "latest": best or cur,
+                              "update_available": bool(best and cur and _vtuple(best) > _vtuple(cur)),
+                              "seen": sorted(set(seen), key=_vtuple)})
 
 
 async def api_memory_info(r):
     u = current_user(r)
     if not u: return web.json_response({"error": "auth"}, status=401)
-    if not SELF_HOST:
+    # The house master memory is HOUSE-ONLY. SELF_HOST is not the right test: the hosted unit sets
+    # it too, so a plain customer was handed the house path and line counts (found by the tester).
+    if not _really_local(r):
         return web.json_response({"error": "forbidden"}, status=403)
     mm = master_memory()
     return web.json_response({"master_memory_bytes": len(mm), "master_memory_lines": mm.count("\n"),
@@ -5425,8 +6295,11 @@ async def api_remember(r):
     return web.json_response({"ok": True, "remember_all": on})
 
 
-PROOF_PAGE = """<!doctype html><meta charset=utf-8><title>Your chain - CHC HARNESS</title>
+PROOF_PAGE = """<!doctype html><html lang=en><meta charset=utf-8><title>Your chain - CHC HARNESS</title>
 <meta name=viewport content="width=device-width,initial-scale=1">
+<meta name=description content="Your own signed receipt chain: the account's private vault, its head and merkle root, verifiable without trusting the house.">
+<meta name=robots content="noindex,follow">
+<link rel=canonical href="https://ai.94-237-56-140.sslip.io/proof">
 <style>
 body{background:#05060a;color:#e8edf7;font:15px/1.6 system-ui;max-width:640px;margin:6vh auto;padding:0 20px}
 h1{font:900 28px/1 system-ui;color:#39ff9e;letter-spacing:.02em;margin-bottom:4px}
@@ -5763,6 +6636,7 @@ def build_app():
     app = web.Application(middlewares=[gate_auth_mw, infra_deny_mw, no_store_mw],client_max_size=4 * 1024 * 1024)
     app.router.add_get("/", h_index)
     app.router.add_get("/health", h_health)
+    app.router.add_get("/health/hindsight", h_hindsight_health)
     app.router.add_get("/download", h_download)
     app.router.add_get("/install.sh", h_install_sh)
     app.router.add_get("/dockerfile", h_dockerfile)
@@ -5779,6 +6653,8 @@ def build_app():
     app.router.add_get("/activate", h_activate)
     app.router.add_get("/assist", h_assist)
     app.router.add_get("/free", h_free)
+    app.router.add_get("/try", h_try)
+    app.router.add_post("/api/try", api_try)
     app.router.add_get("/self-host", h_selfhost_page)
     app.router.add_get("/compare", h_compare)
     app.router.add_get("/robots.txt", h_robots)
@@ -5789,6 +6665,8 @@ def build_app():
     app.router.add_get("/{name:google[A-Za-z0-9_.-]*\\.html}", h_google_verify_file, name="gverify")
     app.router.add_post("/admin/verify-put", h_verify_put)
     app.router.add_get("/sitemap.xml", h_sitemap)
+    app.router.add_get("/feedback", h_feedback)
+    app.router.add_post("/api/feedback", api_feedback)
     app.router.add_get("/api/assist", api_assist)
     app.router.add_post("/api/assist", api_assist)
     app.router.add_get("/admin/assist", h_admin_assist)
@@ -5826,6 +6704,9 @@ def build_app():
     app.router.add_get("/api/chats/{cid}", api_chat_get)
     app.router.add_get("/api/chats/{cid}/since", api_chat_since)
     app.router.add_post("/api/chat", api_chat)
+    app.router.add_post("/api/gen", api_gen)
+    app.router.add_get("/api/job", api_job)
+    app.router.add_get("/media/gen/{path:.*}", h_gen_media)
     app.router.add_route("*", "/api/keys", api_keys)
     app.router.add_delete("/api/keys/{prefix}", api_key_delete)
     app.router.add_get("/api/keys/{prefix}", api_key_get_denied)
@@ -5851,6 +6732,11 @@ def build_app():
     app.router.add_post("/api/publish", api_publish)
     app.router.add_get("/p/{token}", h_published)
     app.router.add_post("/api/upload", api_upload)
+    app.router.add_post("/api/image", api_image)
+    app.router.add_get("/media/{path:.*}", h_media)
+    app.router.add_get("/js/imgcap.js", h_imgjs)
+    app.router.add_post("/api/see", api_see)
+    app.router.add_get("/js/see.js", h_seejs)
     app.router.add_get("/api/workfiles", api_workfiles)
     app.router.add_get("/work/{name}", h_workfile)
     app.router.add_get("/files/{fid}", h_file)

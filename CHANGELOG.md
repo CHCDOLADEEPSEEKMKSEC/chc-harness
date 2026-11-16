@@ -19,3 +19,20 @@ The working day's fixes, all proven on the box:
   setpriv, which made `sudo -n` fail with "setresuid failed". Owner's box, owner's shell.
 - Login: single-step magic link on the private dev build (`CHC_NO_2FA=1`), 2FA unchanged for any public
   install; session cookie still HttpOnly/SameSite=Lax.
+
+## 3.7.2-dev — 16 Nov 2026
+**The guest door.** A stranger can now talk to DADDY with no account, no card, no cookie:
+- `GET /try` — a standalone page: one input, one answer, no signup.
+- `POST /api/try` — one call to the LOCAL model (no tools, no memory, no upstream key),
+  capped at **5 messages per IP per day** (`CHC_TRY_PER_DAY`), counter in `guest_tries`.
+  Signed-in accounts are never capped, so the owner can test the door.
+- Landing page: hero button **TALK TO DADDY — NO SIGNUP**, and a **TRY IT** link in the nav.
+- Guest mode is honest about its limits: talk only, nothing remembered, no tools.
+
+**Also in this build (folded in from the day's work):**
+- page-JS comment bug that killed the whole app script (`/api/chats/*/since` inside a block comment)
+- duplicate-reply fix at the source: the poller no longer paints a stored row whose text is
+  already on screen (scans every bubble, not just the last)
+- GPU media: `/api/gen`, `/api/job`, `/media/gen/<file>` with staged progress + one-shot retry
+- DEV mode persona, real model label (Qwen3 14B), owner shell via `CHC_SHELL_NODROP=1`
+- HOST REALITY block so the agent knows it runs on the real box with real root

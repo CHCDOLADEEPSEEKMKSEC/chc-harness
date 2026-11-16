@@ -1180,6 +1180,73 @@ APPLET_CSS = """
 .toolblock pre{margin:0 0 8px;font:12px/1.45 ui-monospace,monospace;color:#c7d2e5;white-space:pre-wrap;word-break:break-word;max-height:340px;overflow:auto}
 """
 
+
+# ---------------------------------------------------------------- HOUSE ART (16 Nov)
+# Operator asked for "djs and decks and graffiti" up front. The GPU image path is blocked from this
+# box (Thunder's ssh ports are unreachable both here and from the VPS), so this is hand-built SVG:
+# two spinning decks, a spray wall and the house tag. No external files, no network, scales clean.
+HOUSE_ART = """
+<div style="margin:26px 0 18px;border-radius:18px;overflow:hidden;border:1px solid var(--line);position:relative">
+<svg viewBox="0 0 1200 300" width="100%" height="auto" role="img" aria-label="Two turntables on a graffitied wall">
+ <defs>
+  <linearGradient id="brick" x1="0" y1="0" x2="0" y2="1">
+   <stop offset="0" stop-color="#161a22"/><stop offset="1" stop-color="#0a0d13"/></linearGradient>
+  <radialGradient id="spray" cx="50%" cy="50%" r="50%">
+   <stop offset="0" stop-color="#39ff9e" stop-opacity=".45"/><stop offset="1" stop-color="#39ff9e" stop-opacity="0"/></radialGradient>
+  <radialGradient id="pink" cx="50%" cy="50%" r="50%">
+   <stop offset="0" stop-color="#a855f7" stop-opacity=".5"/><stop offset="1" stop-color="#a855f7" stop-opacity="0"/></radialGradient>
+  <radialGradient id="vinyl" cx="35%" cy="30%" r="75%">
+   <stop offset="0" stop-color="#2a2f3a"/><stop offset="1" stop-color="#05070b"/></radialGradient>
+ </defs>
+ <rect width="1200" height="300" fill="url(#brick)"/>
+ <g stroke="#1d2230" stroke-width="1" opacity=".55">
+  <path d="M0 60H1200M0 120H1200M0 180H1200M0 240H1200"/>
+  <path d="M150 60V0M390 120V60M630 180V120M870 240V180"/>
+ </g>
+ <circle cx="180" cy="80" r="150" fill="url(#spray)"/>
+ <circle cx="1040" cy="220" r="170" fill="url(#pink)"/>
+ <g fill="#39ff9e" opacity=".85" font-family="Impact,system-ui" font-weight="900">
+  <text x="560" y="120" font-size="86" letter-spacing="4" transform="rotate(-6 560 120)">BAFOUNE</text>
+  <text x="600" y="196" font-size="34" letter-spacing="10" opacity=".7" transform="rotate(-6 600 196)">CHC 3 &#9673; 3</text>
+  <text x="150" y="250" font-size="26" opacity=".55" transform="rotate(4 150 250)">SPRAY IT</text>
+  <text x="900" y="80" font-size="30" opacity=".6" transform="rotate(-8 900 80)">33</text>
+ </g>
+ <g fill="#ff3b30" opacity=".55"><circle cx="300" cy="60" r="6"/><circle cx="316" cy="74" r="3.5"/>
+  <circle cx="284" cy="78" r="3"/><circle cx="322" cy="52" r="2.5"/><circle cx="830" cy="150" r="5"/>
+  <circle cx="846" cy="164" r="3"/><circle cx="816" cy="166" r="2.5"/></g>
+ <g fill="#4f8cff" opacity=".5"><circle cx="470" cy="250" r="4"/><circle cx="484" cy="262" r="2.5"/></g>
+ <g>
+  <g transform="translate(120,150) rotate(-4)">
+   <rect x="-90" y="-60" width="180" height="120" rx="12" fill="#0d1017" stroke="#2b3244"/>
+   <circle cx="-30" cy="8" r="54" fill="url(#vinyl)" stroke="#2b3244"/>
+   <circle cx="-30" cy="8" r="18" fill="#39ff9e" opacity=".85"/>
+   <g style="transform-origin:-30px 8px;animation:spin 1.6s linear infinite">
+    <rect x="-34" y="-46" width="8" height="108" fill="#39ff9e" opacity=".22"/>
+    <rect x="-84" y="4" width="108" height="8" fill="#39ff9e" opacity=".22"/></g>
+   <circle cx="46" cy="-24" r="26" fill="#0a0d13" stroke="#2b3244"/>
+   <circle cx="46" cy="-24" r="6" fill="#a855f7"/>
+   <rect x="20" y="18" width="40" height="8" rx="4" fill="#39ff9e" opacity=".8"/>
+   <circle cx="72" cy="26" r="9" fill="#0d1017" stroke="#39ff9e" stroke-width="2"/>
+  </g>
+  <g transform="translate(970,170) rotate(5)">
+   <rect x="-90" y="-60" width="180" height="120" rx="12" fill="#0d1017" stroke="#2b3244"/>
+   <circle cx="-30" cy="8" r="54" fill="url(#vinyl)" stroke="#2b3244"/>
+   <circle cx="-30" cy="8" r="18" fill="#a855f7" opacity=".85"/>
+   <g style="transform-origin:-30px 8px;animation:spin 1.3s linear infinite">
+    <rect x="-34" y="-46" width="8" height="108" fill="#a855f7" opacity=".22"/>
+    <rect x="-84" y="4" width="108" height="8" fill="#a855f7" opacity=".22"/></g>
+   <circle cx="46" cy="-24" r="26" fill="#0a0d13" stroke="#2b3244"/>
+   <circle cx="46" cy="-24" r="6" fill="#39ff9e"/>
+   <rect x="20" y="18" width="40" height="8" rx="4" fill="#a855f7" opacity=".8"/>
+   <circle cx="72" cy="26" r="9" fill="#0d1017" stroke="#a855f7" stroke-width="2"/>
+  </g>
+ </g>
+ <path d="M470 60 C 540 30, 600 90, 660 55 C 700 30, 730 70, 700 95" stroke="#39ff9e" stroke-width="3" fill="none" opacity=".5"/>
+</svg>
+<style>@keyframes spin{to{transform:rotate(360deg)}}</style>
+</div>
+"""
+
 def landing():
     sparks = "".join(
         f'<div class="spark" style="left:{(i*7)%100}px;bottom:-10px;animation-duration:{6+i%5}s;animation-delay:-{i%7}s"></div>'
@@ -1195,6 +1262,7 @@ def landing():
   <h1 class=wordmark>CHC HARNESS<span class=see>SEE 7.7.8</span></h1>
   <p class=sub>Your own AI workspace — <b>streamed token by token</b>, running Qwen on hardware we own.
   Chat, code, write, automate, with a private 1 GB workspace that is yours alone. <b>$5 a month, one price, nothing to install.</b></p>
+  {HOUSE_ART}
   <div class=row>
     <a class="btn" href="{BASE}/signup">CREATE ACCOUNT</a>
 <a class="btn ghost" href="{BASE}/try" style="border-color:var(--neo);color:var(--neo)">TALK TO DADDY — NO SIGNUP</a>
@@ -5361,6 +5429,7 @@ a{color:var(--neo)}
 </style></head><body><div class=wrap>
 <h1>TALK TO DADDY</h1>
 <p class=sub>No account. No card. A few messages per connection per day — then make one if you want the real thing.</p>
+<div id="art-here"></div>
 <div id=log></div>
 <div class=row><input id=q placeholder="Ask it something real..." autocomplete=off>
 <button id=go>ASK</button></div>
@@ -6654,6 +6723,9 @@ def build_app():
     app.router.add_get("/assist", h_assist)
     app.router.add_get("/free", h_free)
     app.router.add_get("/try", h_try)
+    # The operator is always signed in, so "/" is his app - this shows the marketing front door
+    # (murals, prices, the guest door) without him having to log out or open an incognito window.
+    app.router.add_get("/landing", lambda r: web.Response(text=landing(), content_type="text/html"))
     app.router.add_post("/api/try", api_try)
     app.router.add_get("/self-host", h_selfhost_page)
     app.router.add_get("/compare", h_compare)
